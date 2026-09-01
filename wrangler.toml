@@ -9,9 +9,10 @@ compatibility_flags = ["nodejs_compat"]
 #
 # Required:
 #   X402_PAY_TO        - Your wallet address (receives USDC on Base)
-#   FACILITATOR_URL    - x402 facilitator endpoint (e.g. Coinbase CDP)
 #
 # Optional:
+#   FACILITATOR_URL    - Override facilitator (defaults to https://facilitator.xpay.sh,
+#                        a free public facilitator with no signup required)
 #   RECEIPT_SECRET     - HMAC key for signing JSON receipts
 
 # ── Custom Domain ──────────────────────────────────────────────────

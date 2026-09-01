@@ -9,7 +9,12 @@
     "typecheck": "tsc --noEmit",
     "tail": "wrangler tail"
   },
-  "keywords": ["x402", "ai-agents", "micropayments", "cloudflare-workers"],
+  "keywords": [
+    "x402",
+    "ai-agents",
+    "micropayments",
+    "cloudflare-workers"
+  ],
   "author": "",
   "license": "ISC",
   "devDependencies": {
@@ -20,6 +25,7 @@
   "dependencies": {
     "@x402/core": "^2.24.0",
     "@x402/evm": "^2.24.0",
+    "@x402/extensions": "^2.24.0",
     "@x402/hono": "^2.24.0",
     "hono": "^4.13.5"
   }

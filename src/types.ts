@@ -5,8 +5,13 @@ export interface Env {
 
   // Secrets (set via `wrangler secret put`)
   X402_PAY_TO: string;
-  FACILITATOR_URL: string;
   RECEIPT_SECRET: string;
+
+  // Optional: override facilitator URL (defaults to https://facilitator.xpay.sh)
+  FACILITATOR_URL?: string;
+  // Optional: only needed if you switch to the CDP Facilitator for Bazaar indexing
+  CDP_API_KEY_ID?: string;
+  CDP_API_KEY_SECRET?: string;
 
   // Config
   ENVIRONMENT: string;
