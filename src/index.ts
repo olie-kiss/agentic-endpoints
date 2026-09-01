@@ -13,6 +13,7 @@ import webScraperHandler from "./handlers/web-scraper";
 import pdfParserHandler from "./handlers/pdf-parser";
 import tokenCompressorHandler from "./handlers/token-compressor";
 import vaultHandler from "./handlers/vault";
+import { landingPage } from "./pages/landing";
 
 // Re-export the Durable Object classes so wrangler can find them
 export { OnceKey } from "./durable-objects/once-key";
@@ -24,63 +25,75 @@ const app = new Hono<{ Bindings: Env }>();
 app.use("*", cors());
 
 // ── Health / discovery ────────────────────────────────────────────
-app.get("/", (c) =>
-  c.json({
-    name: "agentic-endpoints",
-    version: "1.0.0",
-    protocol: "x402",
-    endpoints: [
-      {
-        path: "/once-key",
-        method: "POST",
-        price: "$0.001",
-        description: "Atomic idempotency witness — claim a key exactly once",
-      },
-      {
-        path: "/scrape",
-        method: "POST",
-        price: "$0.005",
-        description: "Pay-per-query web scraping and text extraction",
-      },
-      {
-        path: "/pdf-parse",
-        method: "POST",
-        price: "$0.01",
-        description: "PDF text extraction from URL",
-      },
-      {
-        path: "/compress",
-        method: "POST",
-        price: "$0.005",
-        description: "Token compression / context reduction for LLMs",
-      },
-      {
-        path: "/vault/store",
-        method: "POST",
-        price: "free",
-        description: "Store an encrypted item (client-side encryption)",
-      },
-      {
-        path: "/vault/retrieve",
-        method: "POST",
-        price: "$0.02",
-        description: "Retrieve an encrypted item",
-      },
-      {
-        path: "/vault/delete",
-        method: "POST",
-        price: "free",
-        description: "Delete an encrypted item",
-      },
-      {
-        path: "/vault/exists",
-        method: "POST",
-        price: "free",
-        description: "Check if an encrypted item exists",
-      },
-    ],
-  }),
-);
+app.get("/", (c) => {
+  const accept = c.req.header("Accept") ?? "";
+
+  // Serve JSON for machines (explicit JSON accept or no-accept curl-style)
+  if (
+    accept.includes("application/json") &&
+    !accept.includes("text/html")
+  ) {
+    return c.json({
+      name: "agentic-endpoints",
+      version: "1.0.0",
+      protocol: "x402",
+      endpoints: [
+        {
+          path: "/once-key",
+          method: "POST",
+          price: "$0.001",
+          description:
+            "Atomic idempotency witness — claim a key exactly once",
+        },
+        {
+          path: "/scrape",
+          method: "POST",
+          price: "$0.005",
+          description: "Pay-per-query web scraping and text extraction",
+        },
+        {
+          path: "/pdf-parse",
+          method: "POST",
+          price: "$0.01",
+          description: "PDF text extraction from URL",
+        },
+        {
+          path: "/compress",
+          method: "POST",
+          price: "$0.005",
+          description: "Token compression / context reduction for LLMs",
+        },
+        {
+          path: "/vault/store",
+          method: "POST",
+          price: "free",
+          description: "Store an encrypted item (client-side encryption)",
+        },
+        {
+          path: "/vault/retrieve",
+          method: "POST",
+          price: "$0.02",
+          description: "Retrieve an encrypted item",
+        },
+        {
+          path: "/vault/delete",
+          method: "POST",
+          price: "free",
+          description: "Delete an encrypted item",
+        },
+        {
+          path: "/vault/exists",
+          method: "POST",
+          price: "free",
+          description: "Check if an encrypted item exists",
+        },
+      ],
+    });
+  }
+
+  // Serve HTML landing page for browsers
+  return c.html(landingPage());
+});
 
 // ── Health check (free) ───────────────────────────────────────────
 app.get("/health", (c) => c.json({ status: "ok" }));
