@@ -12,9 +12,11 @@ import onceKeyHandler from "./handlers/once-key";
 import webScraperHandler from "./handlers/web-scraper";
 import pdfParserHandler from "./handlers/pdf-parser";
 import tokenCompressorHandler from "./handlers/token-compressor";
+import vaultHandler from "./handlers/vault";
 
-// Re-export the Durable Object class so wrangler can find it
+// Re-export the Durable Object classes so wrangler can find them
 export { OnceKey } from "./durable-objects/once-key";
+export { Vault } from "./durable-objects/vault";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -52,6 +54,30 @@ app.get("/", (c) =>
         price: "$0.005",
         description: "Token compression / context reduction for LLMs",
       },
+      {
+        path: "/vault/store",
+        method: "POST",
+        price: "free",
+        description: "Store an encrypted item (client-side encryption)",
+      },
+      {
+        path: "/vault/retrieve",
+        method: "POST",
+        price: "$0.02",
+        description: "Retrieve an encrypted item",
+      },
+      {
+        path: "/vault/delete",
+        method: "POST",
+        price: "free",
+        description: "Delete an encrypted item",
+      },
+      {
+        path: "/vault/exists",
+        method: "POST",
+        price: "free",
+        description: "Check if an encrypted item exists",
+      },
     ],
   }),
 );
@@ -64,6 +90,7 @@ app.route("/once-key", onceKeyHandler);
 app.route("/scrape", webScraperHandler);
 app.route("/pdf-parse", pdfParserHandler);
 app.route("/compress", tokenCompressorHandler);
+app.route("/vault", vaultHandler);
 
 // ── Export with x402 payment layer ────────────────────────────────
 export default {
@@ -109,6 +136,15 @@ export default {
           price: "$0.005",
         },
         description: "Token compression for LLMs",
+      },
+      "/vault/retrieve": {
+        accepts: {
+          scheme: "exact",
+          network: "eip155:8453",
+          payTo: env.X402_PAY_TO,
+          price: "$0.02",
+        },
+        description: "Retrieve an encrypted item from the vault",
       },
     };
 

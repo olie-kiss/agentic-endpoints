@@ -1,6 +1,7 @@
 export interface Env {
   // Durable Objects
   ONCE_KEY: DurableObjectNamespace;
+  VAULT: DurableObjectNamespace;
 
   // Secrets (set via `wrangler secret put`)
   X402_PAY_TO: string;
@@ -65,4 +66,39 @@ export interface CompressResult {
   ratio: number;
   text: string;
   strategy: string;
+}
+
+export interface VaultStoreRequest {
+  namespace: string;
+  key: string;
+  ciphertext: string;
+  alg?: string;
+  ttl?: number; // seconds
+}
+
+export interface VaultRetrieveRequest {
+  namespace: string;
+  key: string;
+}
+
+export interface VaultStoreResult {
+  status: "stored";
+  namespace: string;
+  key: string;
+  alg: string;
+  created_at: string;
+  expires_at: string | null;
+  receipt: string;
+}
+
+export interface VaultRetrieveResult {
+  status: "retrieved";
+  namespace: string;
+  key: string;
+  ciphertext: string;
+  alg: string;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+  receipt: string;
 }

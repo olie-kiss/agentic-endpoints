@@ -1,6 +1,7 @@
 name = "agentic-endpoints"
 main = "src/index.ts"
 compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
 
 # ── Environment Variables ──────────────────────────────────────────
 # Set these via `wrangler secret put <NAME>` for production,
@@ -28,6 +29,14 @@ ENVIRONMENT = "development"
 name = "ONCE_KEY"
 class_name = "OnceKey"
 
+[[durable_objects.bindings]]
+name = "VAULT"
+class_name = "Vault"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["OnceKey"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Vault"]
