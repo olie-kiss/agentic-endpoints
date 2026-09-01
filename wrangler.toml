@@ -13,6 +13,13 @@ compatibility_date = "2025-04-01"
 # Optional:
 #   RECEIPT_SECRET     - HMAC key for signing JSON receipts
 
+# ── Custom Domain ──────────────────────────────────────────────────
+# Requires oliverkiss.com to be added to your Cloudflare account.
+# Cloudflare will auto-provision SSL.
+routes = [
+  { pattern = "ai.oliverkiss.com/*", zone_name = "oliverkiss.com" }
+]
+
 [vars]
 ENVIRONMENT = "development"
 
