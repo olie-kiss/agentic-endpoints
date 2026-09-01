@@ -1,0 +1,26 @@
+{
+  "name": "agentic-endpoints",
+  "version": "1.0.0",
+  "description": "x402-powered micro-SaaS utilities for autonomous AI agents",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "tail": "wrangler tail"
+  },
+  "keywords": ["x402", "ai-agents", "micropayments", "cloudflare-workers"],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260831.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.127.1"
+  },
+  "dependencies": {
+    "@x402/core": "^2.24.0",
+    "@x402/evm": "^2.24.0",
+    "@x402/hono": "^2.24.0",
+    "hono": "^4.13.5"
+  }
+}

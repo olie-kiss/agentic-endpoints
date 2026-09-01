@@ -1,0 +1,26 @@
+name = "agentic-endpoints"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+
+# ── Environment Variables ──────────────────────────────────────────
+# Set these via `wrangler secret put <NAME>` for production,
+# or in .dev.vars for local development.
+#
+# Required:
+#   X402_PAY_TO        - Your wallet address (receives USDC on Base)
+#   FACILITATOR_URL    - x402 facilitator endpoint (e.g. Coinbase CDP)
+#
+# Optional:
+#   RECEIPT_SECRET     - HMAC key for signing JSON receipts
+
+[vars]
+ENVIRONMENT = "development"
+
+# ── Durable Objects ────────────────────────────────────────────────
+[[durable_objects.bindings]]
+name = "ONCE_KEY"
+class_name = "OnceKey"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OnceKey"]
