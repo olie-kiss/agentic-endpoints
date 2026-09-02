@@ -82,6 +82,12 @@ supports Base mainnet.
 ```bash
 npm run dev
 npm run deploy
+
+# Tests run against the real Workers runtime via workers-pool.
+# The Durable Object tests call the objects directly, since every paid
+# route answers 402 without a real on-chain payment.
+npm test
+npm run typecheck
 ```
 
 ## API Examples
