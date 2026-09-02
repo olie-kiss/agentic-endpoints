@@ -50,17 +50,54 @@ function fromLatin1(s: string): Uint8Array {
 }
 
 /**
+ * Hard ceilings for untrusted input. A PDF is attacker-supplied, so every
+ * unbounded loop or buffer here is a denial-of-service vector.
+ */
+const MAX_INFLATED_BYTES = 32 * 1024 * 1024; // per stream
+const MAX_TOTAL_TEXT = 5 * 1024 * 1024;
+
+/**
  * Inflate a zlib or raw-deflate stream. PDF writers are inconsistent about
  * emitting the zlib header, so try both framings before giving up.
+ *
+ * Output is capped: a decompression bomb is a few KB on the wire and
+ * hundreds of MB once expanded, which would exhaust the Worker's memory.
  */
 async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
   for (const format of ["deflate", "deflate-raw"] as const) {
     try {
       const stream = new Response(data).body;
       if (!stream) continue;
-      const decompressed = stream.pipeThrough(new DecompressionStream(format));
-      const buf = await new Response(decompressed).arrayBuffer();
-      return new Uint8Array(buf);
+
+      const reader = stream
+        .pipeThrough(new DecompressionStream(format))
+        .getReader();
+
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      let truncated = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_INFLATED_BYTES) {
+          truncated = true;
+          await reader.cancel();
+          break;
+        }
+        chunks.push(value);
+      }
+
+      if (truncated) return null;
+
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return out;
     } catch {
       // Wrong framing — fall through and try the next one.
     }
@@ -78,7 +115,11 @@ interface PdfObject {
 /** Index every `N G obj ... endobj` in the file. */
 function parseObjects(raw: string): Map<number, PdfObject> {
   const objects = new Map<number, PdfObject>();
-  const objRegex = /(\d+)\s+(\d+)\s+obj\b/g;
+  // Digit runs are bounded deliberately. An unbounded `\d+` here backtracks
+  // catastrophically across a long run of digits — a 200 KB numeric blob in
+  // a hostile PDF took 60s to scan. Real object and generation numbers are
+  // far smaller than these caps.
+  const objRegex = /(\d{1,10})\s{1,8}(\d{1,6})\s{1,8}obj\b/g;
   let match: RegExpExecArray | null;
 
   while ((match = objRegex.exec(raw)) !== null) {
@@ -206,7 +247,7 @@ function dictValue(
     return dict.slice(i);
   }
 
-  const ref = dict.slice(i).match(/^(\d+)\s+\d+\s+R/);
+  const ref = dict.slice(i).match(/^(\d{1,10})\s{1,8}\d{1,6}\s{1,8}R/);
   if (ref) return objects.get(Number(ref[1]))?.dict ?? null;
 
   return null;
@@ -277,7 +318,7 @@ async function pageFonts(
   const fontDict = dictValue(resources, "/Font", objects);
   if (!fontDict) return fonts;
 
-  for (const entry of fontDict.matchAll(/\/([^\s/<>\[\]()]+)\s+(\d+)\s+\d+\s+R/g)) {
+  for (const entry of fontDict.matchAll(/\/([^\s/<>\[\]()]{1,127})\s{1,8}(\d{1,10})\s{1,8}\d{1,6}\s{1,8}R/g)) {
     const [, name, num] = entry;
     const fontObj = objects.get(Number(num));
     if (!fontObj) continue;
@@ -287,7 +328,7 @@ async function pageFonts(
       /\/Subtype\s*\/Type0/.test(fontObj.dict) ||
       /\/Encoding\s*\/Identity-[HV]/.test(fontObj.dict);
 
-    const toUnicodeRef = fontObj.dict.match(/\/ToUnicode\s+(\d+)\s+\d+\s+R/);
+    const toUnicodeRef = fontObj.dict.match(/\/ToUnicode\s{1,8}(\d{1,10})\s{1,8}\d{1,6}\s{1,8}R/);
     let map = new Map<number, string>();
     if (toUnicodeRef) {
       const cmapObj = objects.get(Number(toUnicodeRef[1]));
@@ -307,12 +348,12 @@ async function pageFonts(
 
 /** Resolve `/Contents` to the list of object numbers holding page content. */
 function contentRefs(dict: string): number[] {
-  const single = dict.match(/\/Contents\s+(\d+)\s+\d+\s+R/);
+  const single = dict.match(/\/Contents\s{1,8}(\d{1,10})\s{1,8}\d{1,6}\s{1,8}R/);
   if (single) return [Number(single[1])];
 
   const array = dict.match(/\/Contents\s*\[([^\]]*)\]/);
   if (array) {
-    return [...array[1].matchAll(/(\d+)\s+\d+\s+R/g)].map((m) => Number(m[1]));
+    return [...array[1].matchAll(/(\d{1,10})\s{1,8}\d{1,6}\s{1,8}R/g)].map((m) => Number(m[1]));
   }
 
   return [];
@@ -510,7 +551,7 @@ export async function extractPdfText(
 
   // Encrypted documents need the standard security handler to decrypt
   // streams; anything we extracted would be ciphertext.
-  if (/\/Encrypt\s+\d+\s+\d+\s+R/.test(raw)) {
+  if (/\/Encrypt\s{1,8}\d{1,10}\s{1,8}\d{1,6}\s{1,8}R/.test(raw)) {
     return { pages: [], reason: "encrypted" };
   }
 
@@ -524,8 +565,14 @@ export async function extractPdfText(
 
   const pages: PdfPage[] = [];
 
+  let totalText = 0;
+
   if (pageObjects.length > 0) {
     for (const [idx, pageObj] of pageObjects.entries()) {
+      // Stop once the response would be unreasonably large rather than
+      // building a multi-hundred-megabyte JSON body.
+      if (totalText >= MAX_TOTAL_TEXT) break;
+
       const fonts = await pageFonts(pageObj.dict, objects);
       const parts: string[] = [];
       for (const ref of contentRefs(pageObj.dict)) {
@@ -534,10 +581,9 @@ export async function extractPdfText(
         const content = await decodeStream(target);
         if (content) parts.push(extractTextFromContent(content, fonts));
       }
-      pages.push({
-        page: idx + 1,
-        text: parts.filter(Boolean).join("\n").trim(),
-      });
+      const text = parts.filter(Boolean).join("\n").trim();
+      totalText += text.length;
+      pages.push({ page: idx + 1, text });
     }
   } else {
     // No page tree found — likely a cross-reference/object stream PDF.
@@ -548,7 +594,10 @@ export async function extractPdfText(
       if (/\/Type\s*\/(XObject|Metadata|ObjStm|XRef|Font)/.test(obj.dict)) continue;
       const content = await decodeStream(obj);
       if (content && /(\bTj\b|\bTJ\b|\bBT\b)/.test(content)) {
-        parts.push(extractTextFromContent(content, new Map()));
+        const text = extractTextFromContent(content, new Map());
+        totalText += text.length;
+        parts.push(text);
+        if (totalText >= MAX_TOTAL_TEXT) break;
       }
     }
     const text = parts.filter(Boolean).join("\n").trim();
