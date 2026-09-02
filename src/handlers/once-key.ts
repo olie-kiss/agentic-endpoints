@@ -30,12 +30,19 @@ app.post("/", async (c) => {
       body: JSON.stringify({
         action_key: body.action_key,
         payload_sha256: body.payload_sha256,
+        namespace_token: body.namespace_token,
         ttl: body.ttl,
       }),
     }),
   );
 
   const result = await doResponse.json<Record<string, unknown>>();
+
+  // Authorization and validation failures carry no receipt and must keep
+  // their status so the payment is not settled for a rejected request.
+  if (!doResponse.ok) {
+    return c.json(result, doResponse.status as 400 | 403 | 405);
+  }
 
   // Attach a signed receipt
   const receipt = await signReceipt(

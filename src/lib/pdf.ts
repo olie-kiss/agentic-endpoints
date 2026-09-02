@@ -29,6 +29,9 @@ export interface PdfExtraction {
   pages: PdfPage[];
   /** Set when the document was readable but contains no extractable text. */
   reason?: "encrypted" | "no-text" | "unsupported";
+  /** True when extraction stopped early at a resource limit. Silent
+   *  truncation would let an agent act on a partial document. */
+  truncated?: boolean;
 }
 
 /** Decode bytes to a string where 1 byte == 1 char, preserving offsets. */
@@ -53,8 +56,19 @@ function fromLatin1(s: string): Uint8Array {
  * Hard ceilings for untrusted input. A PDF is attacker-supplied, so every
  * unbounded loop or buffer here is a denial-of-service vector.
  */
-const MAX_INFLATED_BYTES = 32 * 1024 * 1024; // per stream
+const MAX_INFLATED_BYTES = 16 * 1024 * 1024; // per stream
+const MAX_TOTAL_INFLATED = 64 * 1024 * 1024; // across the whole document
 const MAX_TOTAL_TEXT = 5 * 1024 * 1024;
+const MAX_OBJSTM_ENTRIES = 10_000; // per object stream
+const MAX_CMAP_ENTRIES = 65_536; // per font
+const MAX_CMAP_DEST_CHARS = 64; // per mapped code
+
+/**
+ * Cumulative inflate budget for one parse. Without it, a document holding
+ * hundreds of individually-legal streams still adds up to gigabytes of
+ * decompression work.
+ */
+let inflateBudget = MAX_TOTAL_INFLATED;
 
 /**
  * Inflate a zlib or raw-deflate stream. PDF writers are inconsistent about
@@ -81,7 +95,7 @@ async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
         const { done, value } = await reader.read();
         if (done) break;
         total += value.byteLength;
-        if (total > MAX_INFLATED_BYTES) {
+        if (total > MAX_INFLATED_BYTES || total > inflateBudget) {
           truncated = true;
           await reader.cancel();
           break;
@@ -90,6 +104,7 @@ async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
       }
 
       if (truncated) return null;
+      inflateBudget -= total;
 
       const out = new Uint8Array(total);
       let offset = 0;
@@ -184,9 +199,12 @@ async function expandObjectStreams(objects: Map<number, PdfObject>) {
     const data = await decodeStream(obj);
     if (!data) continue;
 
-    const count = Number(obj.dict.match(/\/N\s+(\d+)/)?.[1] ?? 0);
-    const first = Number(obj.dict.match(/\/First\s+(\d+)/)?.[1] ?? 0);
-    if (!count || !first) continue;
+    // /N is attacker-controlled. Unclamped, "/N 999999999999" drives the
+    // loop below for ~10^12 iterations from a ~200-byte file.
+    const declared = Number(obj.dict.match(/\/N\s{1,8}(\d{1,9})/)?.[1] ?? 0);
+    const first = Number(obj.dict.match(/\/First\s{1,8}(\d{1,9})/)?.[1] ?? 0);
+    if (!declared || !first || first > data.length) continue;
+    const count = Math.min(declared, MAX_OBJSTM_ENTRIES);
 
     const header = data.slice(0, first).trim().split(/\s+/).map(Number);
     for (let i = 0; i < count; i++) {
@@ -194,9 +212,11 @@ async function expandObjectStreams(objects: Map<number, PdfObject>) {
       const offset = header[i * 2 + 1];
       if (!Number.isFinite(num) || !Number.isFinite(offset)) continue;
 
+      const start = first + offset;
       const nextOffset =
         i + 1 < count ? first + header[i * 2 + 3] : data.length;
-      const body = data.slice(first + offset, nextOffset);
+      if (start > data.length || nextOffset < start) continue;
+      const body = data.slice(start, Math.min(nextOffset, data.length));
 
       // Objects written directly in the file take precedence over the
       // packed copy, which may be a superseded revision.
@@ -258,6 +278,10 @@ function parseToUnicode(cmap: string): Map<number, string> {
   const map = new Map<number, string>();
 
   const hexToText = (hex: string): string => {
+    // A destination is a handful of UTF-16 units in any real CMap. Bounding
+    // it stops a crafted 1 MB destination from being replicated across
+    // 65 536 range entries.
+    if (hex.length > MAX_CMAP_DEST_CHARS * 4) return "";
     let out = "";
     for (let i = 0; i + 3 < hex.length + 1; i += 4) {
       const unit = hex.slice(i, i + 4);
@@ -297,6 +321,7 @@ function parseToUnicode(cmap: string): Map<number, string> {
       // Guard against a malformed range asking us to build millions of entries.
       const end = Math.min(hi, lo + 65535);
       for (let code = lo; code <= end; code++) {
+        if (map.size >= MAX_CMAP_ENTRIES) break;
         map.set(code, hexToText(prefix + (base + code - lo).toString(16).padStart(4, "0")));
       }
     }
@@ -309,6 +334,9 @@ function parseToUnicode(cmap: string): Map<number, string> {
 async function pageFonts(
   pageDict: string,
   objects: Map<number, PdfObject>,
+  /** Shared across pages: the same font is usually referenced by every page,
+   *  and re-inflating and re-parsing its CMap each time is pure waste. */
+  cache: Map<number, FontMap>,
 ): Promise<Map<string, FontMap>> {
   const fonts = new Map<string, FontMap>();
 
@@ -320,7 +348,14 @@ async function pageFonts(
 
   for (const entry of fontDict.matchAll(/\/([^\s/<>\[\]()]{1,127})\s{1,8}(\d{1,10})\s{1,8}\d{1,6}\s{1,8}R/g)) {
     const [, name, num] = entry;
-    const fontObj = objects.get(Number(num));
+    const objNum = Number(num);
+    const cached = cache.get(objNum);
+    if (cached) {
+      fonts.set(name, cached);
+      continue;
+    }
+
+    const fontObj = objects.get(objNum);
     if (!fontObj) continue;
 
     // Composite fonts address glyphs with 2-byte codes.
@@ -339,7 +374,9 @@ async function pageFonts(
     }
 
     if (map.size > 0 || isTwoByte) {
-      fonts.set(name, { map, bytes: isTwoByte ? 2 : 1 });
+      const fontMap: FontMap = { map, bytes: isTwoByte ? 2 : 1 };
+      cache.set(objNum, fontMap);
+      fonts.set(name, fontMap);
     }
   }
 
@@ -543,6 +580,8 @@ function extractTextFromContent(
 export async function extractPdfText(
   bytes: Uint8Array,
 ): Promise<PdfExtraction> {
+  inflateBudget = MAX_TOTAL_INFLATED;
+
   const raw = toLatin1(bytes);
 
   if (!raw.startsWith("%PDF-") && !raw.slice(0, 1024).includes("%PDF-")) {
@@ -564,16 +603,21 @@ export async function extractPdfText(
   );
 
   const pages: PdfPage[] = [];
+  const fontCache = new Map<number, FontMap>();
 
   let totalText = 0;
+  let truncated = false;
 
   if (pageObjects.length > 0) {
     for (const [idx, pageObj] of pageObjects.entries()) {
       // Stop once the response would be unreasonably large rather than
       // building a multi-hundred-megabyte JSON body.
-      if (totalText >= MAX_TOTAL_TEXT) break;
+      if (totalText >= MAX_TOTAL_TEXT) {
+        truncated = true;
+        break;
+      }
 
-      const fonts = await pageFonts(pageObj.dict, objects);
+      const fonts = await pageFonts(pageObj.dict, objects, fontCache);
       const parts: string[] = [];
       for (const ref of contentRefs(pageObj.dict)) {
         const target = objects.get(ref);
@@ -597,7 +641,10 @@ export async function extractPdfText(
         const text = extractTextFromContent(content, new Map());
         totalText += text.length;
         parts.push(text);
-        if (totalText >= MAX_TOTAL_TEXT) break;
+        if (totalText >= MAX_TOTAL_TEXT) {
+        truncated = true;
+        break;
+      }
       }
     }
     const text = parts.filter(Boolean).join("\n").trim();
@@ -606,8 +653,8 @@ export async function extractPdfText(
 
   const hasText = pages.some((p) => p.text.length > 0);
   if (!hasText) {
-    return { pages: [], reason: "no-text" };
+    return { pages: [], reason: "no-text", truncated };
   }
 
-  return { pages };
+  return { pages, truncated };
 }

@@ -22,6 +22,8 @@ export interface Env {
 }
 
 export interface ClaimRequest {
+  /** One-time owner token, issued on the first request to a namespace. */
+  namespace_token?: string;
   namespace: string;
   action_key: string;
   payload_sha256?: string;
@@ -73,6 +75,9 @@ export interface CompressResult {
   original_length: number;
   compressed_length: number;
   ratio: number;
+  original_tokens_est: number;
+  compressed_tokens_est: number;
+  target_tokens: number | null;
   text: string;
   strategy: string;
 }

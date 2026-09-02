@@ -6,7 +6,9 @@ const app = new Hono<{ Bindings: Env }>();
 
 /** Rough English estimate: ~4 characters per token. */
 const CHARS_PER_TOKEN = 4;
-const MAX_INPUT_CHARS = 1_000_000;
+const MAX_INPUT_CHARS = 400_000;
+/** Beyond this, force a sentence break regardless of abbreviation context. */
+const MAX_SENTENCE_CHARS = 4096;
 
 const estimateTokens = (s: string) => Math.ceil(s.length / CHARS_PER_TOKEN);
 
@@ -110,7 +112,16 @@ function splitSentences(text: string): string[] {
     // domain names stay intact.
     const next = text[i + 1];
     if (next !== undefined && !/\s/.test(next)) continue;
-    if (ABBREVIATIONS.test(current.slice(0, -1).trimEnd())) continue;
+
+    // Test only the tail. ABBREVIATIONS is anchored at the end but not the
+    // start, so testing the whole accumulator is O(len) — and because a match
+    // continues without resetting `current`, the accumulator grows without
+    // bound. Input like "Dr. " repeated made this quadratic: 1 MB took 18s.
+    if (ABBREVIATIONS.test(current.slice(-24, -1).trimEnd())) {
+      // Force a hard break if one "sentence" has grown pathologically long,
+      // so a crafted input degrades gracefully instead of running away.
+      if (current.length < MAX_SENTENCE_CHARS) continue;
+    }
 
     if (current.trim()) out.push(current.trim());
     current = "";
@@ -146,8 +157,11 @@ function extractiveSummarize(text: string, targetChars: number): string {
   const sentences = splitSentences(text);
   if (sentences.length <= 1) return truncateOnWordBoundary(text, targetChars);
 
+  // Unicode-aware. An ASCII-only split returns zero words for Chinese,
+  // Arabic, Cyrillic, Hindi and so on, which zeroed every score and made the
+  // endpoint useless for non-English callers.
   const words = (s: string) =>
-    s.toLowerCase().split(/[^a-z0-9']+/).filter(Boolean);
+    s.toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(Boolean);
 
   const wordFreq = new Map<string, number>();
   for (const sentence of sentences) {
@@ -186,9 +200,11 @@ function extractiveSummarize(text: string, targetChars: number): string {
   const unique = scored.filter((s) => {
     const fingerprint = s.text
       .toLowerCase()
-      .replace(/[^a-z0-9]/g, "")
+      .replace(/[^\p{L}\p{N}]/gu, "")
       .slice(0, 80);
-    if (seen.has(fingerprint)) return false;
+    // An empty fingerprint means "no letters or digits at all" (e.g. a line of
+    // punctuation). Those are not duplicates of each other.
+    if (fingerprint && seen.has(fingerprint)) return false;
     seen.add(fingerprint);
     return true;
   });
@@ -201,7 +217,7 @@ function extractiveSummarize(text: string, targetChars: number): string {
   const selected: typeof unique = [];
   let charCount = 0;
   for (const s of unique) {
-    const cost = s.text.length + 1;
+    const cost = s.text.length + (selected.length > 0 ? 1 : 0);
     if (charCount + cost > targetChars) continue;
     selected.push(s);
     charCount += cost;

@@ -1,6 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types";
-import { generateToken, hashToken, timingSafeEqual } from "../lib/utils";
+import {
+  generateToken,
+  hashToken,
+  normalizeTtl,
+  timingSafeEqual,
+} from "../lib/utils";
 
 /**
  * Vault — Encrypted key-value store backed by Durable Object SQLite.
@@ -30,11 +35,24 @@ export class Vault extends DurableObject<Env> {
         key          TEXT PRIMARY KEY,
         ciphertext   TEXT NOT NULL,
         alg          TEXT NOT NULL DEFAULT 'aes-256-gcm',
+        size_bytes   INTEGER NOT NULL DEFAULT 0,
         created_at   TEXT NOT NULL,
         updated_at   TEXT NOT NULL,
         expires_at   TEXT
       )
     `);
+    // Namespaces created before size_bytes existed still have the old shape.
+    try {
+      this.ctx.storage.sql.exec(
+        `ALTER TABLE items ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0`,
+      );
+      this.ctx.storage.sql.exec(
+        `UPDATE items SET size_bytes = LENGTH(ciphertext) WHERE size_bytes = 0`,
+      );
+    } catch {
+      // Column already present.
+    }
+
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS namespace_meta (
         id           INTEGER PRIMARY KEY CHECK (id = 1),
@@ -68,8 +86,21 @@ export class Vault extends DurableObject<Env> {
    * Returns true when the namespace is unclaimed (caller is about to claim it).
    */
   private async isAuthorized(token: string | undefined): Promise<boolean> {
-    if (this.getOwnerHash() === null) return true;
+    if (this.getOwnerHash() === null) {
+      // A namespace holding items but no owner predates the ownership model.
+      // Allowing a claim here would hand an attacker every item written
+      // during that window, so these are locked rather than claimable.
+      return !this.hasItems();
+    }
     return this.isOwner(token);
+  }
+
+  private hasItems(): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec(`SELECT 1 FROM items LIMIT 1`)
+        .toArray().length > 0
+    );
   }
 
   /** Drop expired items so they don't count against the namespace quota. */
@@ -83,7 +114,7 @@ export class Vault extends DurableObject<Env> {
   private usage(): { count: number; bytes: number } {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(ciphertext)), 0) AS bytes
+        `SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes
          FROM items`,
       )
       .toArray();
@@ -145,13 +176,22 @@ export class Vault extends DurableObject<Env> {
       );
     }
 
-    if (body.ciphertext.length > MAX_CIPHERTEXT_BYTES) {
+    // Byte length, not character count: a multi-byte string is larger on
+    // disk than `.length` suggests, so the quota was under-counting.
+    const ciphertextBytes = new TextEncoder().encode(body.ciphertext).byteLength;
+
+    if (ciphertextBytes > MAX_CIPHERTEXT_BYTES) {
       return Response.json(
         {
           error: `ciphertext exceeds the ${MAX_CIPHERTEXT_BYTES}-byte per-item limit`,
         },
         { status: 413 },
       );
+    }
+
+    const ttl = normalizeTtl(body.ttl);
+    if (!ttl.ok) {
+      return Response.json({ error: ttl.error }, { status: 400 });
     }
 
     this.ensureTable();
@@ -165,7 +205,7 @@ export class Vault extends DurableObject<Env> {
     // namespace for its rightful owner.
     this.purgeExpired();
     const existing = this.ctx.storage.sql
-      .exec(`SELECT LENGTH(ciphertext) AS bytes FROM items WHERE key = ?`, body.key)
+      .exec(`SELECT size_bytes AS bytes FROM items WHERE key = ?`, body.key)
       .toArray();
     const replacedBytes = Number(existing[0]?.bytes ?? 0);
     const { count, bytes } = this.usage();
@@ -179,7 +219,7 @@ export class Vault extends DurableObject<Env> {
       );
     }
 
-    if (bytes - replacedBytes + body.ciphertext.length > MAX_NAMESPACE_BYTES) {
+    if (bytes - replacedBytes + ciphertextBytes > MAX_NAMESPACE_BYTES) {
       return Response.json(
         {
           error: `namespace would exceed its ${MAX_NAMESPACE_BYTES}-byte storage quota`,
@@ -189,46 +229,75 @@ export class Vault extends DurableObject<Env> {
     }
 
     // First write claims the namespace and issues a one-time owner token.
+    //
+    // The token is ALWAYS minted here and never taken from the request. If a
+    // caller could choose it they could register a low-entropy value (making
+    // the namespace brute-forceable) or silently pre-claim a namespace they
+    // do not own, locking out its rightful owner with no recovery path.
     let issuedToken: string | undefined;
     if (this.getOwnerHash() === null) {
-      issuedToken = body.namespace_token ?? generateToken();
+      const token = generateToken();
+      const hash = await hashToken(token);
+
+      // The await above yields, so two concurrent first-writes can both
+      // observe an unclaimed namespace. Insert defensively and re-read to
+      // find out who actually won.
       this.ctx.storage.sql.exec(
         `INSERT INTO namespace_meta (id, token_hash, claimed_at)
-         VALUES (1, ?, ?)`,
-        await hashToken(issuedToken),
+         VALUES (1, ?, ?)
+         ON CONFLICT(id) DO NOTHING`,
+        hash,
         new Date().toISOString(),
       );
-      // Only surface a token the caller didn't already choose.
-      if (body.namespace_token) issuedToken = undefined;
+
+      if (this.getOwnerHash() === hash) {
+        issuedToken = token;
+      } else {
+        // Lost the race: another caller owns this namespace now.
+        return this.unauthorized();
+      }
     }
 
     const now = new Date();
-    const expiresAt = body.ttl
-      ? new Date(now.getTime() + body.ttl * 1000).toISOString()
+    const expiresAt = ttl.value
+      ? new Date(now.getTime() + ttl.value * 1000).toISOString()
       : null;
 
     // Upsert — overwrite if key already exists
     this.ctx.storage.sql.exec(
-      `INSERT INTO items (key, ciphertext, alg, created_at, updated_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO items (key, ciphertext, alg, size_bytes, created_at, updated_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET
          ciphertext = excluded.ciphertext,
          alg = excluded.alg,
+         size_bytes = excluded.size_bytes,
          updated_at = excluded.updated_at,
          expires_at = excluded.expires_at`,
       body.key,
       body.ciphertext,
       body.alg ?? "aes-256-gcm",
+      ciphertextBytes,
       now.toISOString(),
       now.toISOString(),
       expiresAt,
     );
 
+    // Report the persisted row, not the request. Overwriting an existing key
+    // preserves its original created_at, so echoing `now` was a lie.
+    const stored = this.ctx.storage.sql
+      .exec(
+        `SELECT created_at, updated_at, size_bytes FROM items WHERE key = ?`,
+        body.key,
+      )
+      .toArray()[0];
+
     return Response.json({
       status: "stored",
       key: body.key,
       alg: body.alg ?? "aes-256-gcm",
-      created_at: now.toISOString(),
+      size_bytes: Number(stored?.size_bytes ?? ciphertextBytes),
+      created_at: String(stored?.created_at ?? now.toISOString()),
+      updated_at: String(stored?.updated_at ?? now.toISOString()),
       expires_at: expiresAt,
       ...(issuedToken
         ? {

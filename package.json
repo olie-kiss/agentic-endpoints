@@ -7,7 +7,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "test": "vitest run"
   },
   "keywords": [
     "x402",
@@ -18,8 +19,10 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260831.1",
     "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
     "wrangler": "^4.127.1"
   },
   "dependencies": {

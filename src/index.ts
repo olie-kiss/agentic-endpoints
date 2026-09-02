@@ -31,51 +31,12 @@ const app = new Hono<{ Bindings: Env }>();
 app.use("*", cors());
 
 /**
- * Rate limiting.
- *
- * Paid requests are self-limiting — each one costs the caller real USDC.
- * The abuse surface is everything else: the free vault operations and the
- * unauthenticated 402 challenge, both of which anyone can spam for nothing.
- * So we meter by client IP and only when no payment is attached.
- */
-app.use("*", async (c, next) => {
-  if (c.req.header("X-PAYMENT")) return next();
-
-  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
-  const { success } = await c.env.FREE_RATE_LIMITER.limit({ key: ip });
-  if (!success) {
-    return c.json(
-      {
-        error: "Rate limit exceeded",
-        detail: "Too many free requests. Retry shortly.",
-      },
-      429,
-      { "Retry-After": "60" },
-    );
-  }
-  return next();
-});
-
-/**
  * Reject oversized request bodies before anything tries to buffer them.
  * Every handler here reads the full body into memory, so an unbounded
  * payload is a cheap way to burn our CPU and memory limits.
  */
 const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB
 
-app.use("*", async (c, next) => {
-  const declared = c.req.header("Content-Length");
-  if (declared && Number(declared) > MAX_BODY_BYTES) {
-    return c.json(
-      {
-        error: "Request body too large",
-        detail: `Maximum body size is ${MAX_BODY_BYTES} bytes.`,
-      },
-      413,
-    );
-  }
-  return next();
-});
 
 // Vault writes additionally consume durable storage, so they cost more
 // than CPU time and get their own tighter budget.
@@ -160,6 +121,18 @@ app.get("/", (c) => {
           description:
             "Check if an encrypted item exists (requires namespace_token)",
         },
+        {
+          path: "/",
+          method: "GET",
+          price: "free",
+          description: "Service discovery (this document)",
+        },
+        {
+          path: "/health",
+          method: "GET",
+          price: "free",
+          description: "Health check",
+        },
       ],
     });
   }
@@ -171,6 +144,28 @@ app.get("/", (c) => {
 // ── Health check (free) ───────────────────────────────────────────
 app.get("/health", (c) => c.json({ status: "ok" }));
 
+/**
+ * One stable error shape for every failure, including malformed JSON and
+ * unexpected exceptions. Callers are autonomous agents: without this, a bad
+ * body produced a Hono HTML/text error while handlers produced JSON, so
+ * clients had no single contract to parse.
+ */
+app.onError((err, c) => {
+  if (err instanceof SyntaxError) {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+
+  console.error("unhandled_error", {
+    path: c.req.path,
+    method: c.req.method,
+    message: err.message,
+  });
+
+  return c.json({ error: "Internal error" }, 500);
+});
+
+app.notFound((c) => c.json({ error: "Not found", path: c.req.path }, 404));
+
 // ── Route handlers ────────────────────────────────────────────────
 app.route("/once-key", onceKeyHandler);
 app.route("/scrape", webScraperHandler);
@@ -179,6 +174,14 @@ app.route("/compress", tokenCompressorHandler);
 app.route("/vault", vaultHandler);
 
 // ── Export with x402 payment layer ────────────────────────────────
+
+/**
+ * Built lazily on the first request and reused for the isolate's lifetime.
+ * The x402 middleware performs a facilitator handshake at construction time,
+ * so this must not be rebuilt per request.
+ */
+let gatedApp: Hono<{ Bindings: Env }> | null = null;
+
 export default {
   async fetch(
     request: Request,
@@ -385,23 +388,98 @@ export default {
       },
     };
 
+    /**
+     * These checks run on every request, before anything that could depend
+     * on the payment facilitator. An oversized body, a rate-limited caller
+     * and an unknown path all have correct answers that do not require us to
+     * price anything, so an upstream outage must not turn them into 503s.
+     */
+    const declared = request.headers.get("Content-Length");
+    if (declared && Number(declared) > MAX_BODY_BYTES) {
+      return Response.json(
+        {
+          error: "Request body too large",
+          detail: `Maximum body size is ${MAX_BODY_BYTES} bytes.`,
+        },
+        { status: 413 },
+      );
+    }
+
+    /**
+     * Metered ahead of the payment middleware, which answers 402 without
+     * calling next(): metering behind it counted nothing for exactly the
+     * unpaid traffic it was meant to bound. An X-PAYMENT header is
+     * unverified attacker-controlled input here and grants no exemption.
+     */
+    const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+    const { success } = await env.FREE_RATE_LIMITER.limit({ key: ip });
+    if (!success) {
+      return Response.json(
+        {
+          error: "Rate limit exceeded",
+          detail: "Too many requests. Retry shortly.",
+        },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
+    }
+
+    // Free and unknown paths never touch the x402 stack.
+    const path = new URL(request.url).pathname;
+    const isPaidPath = Object.keys(routes).some(
+      (route) => route.replace(/^[A-Z]+\s+/, "") === path,
+    );
+    if (!isPaidPath) {
+      return app.fetch(request, env, ctx);
+    }
+
     // Public, no-signup facilitator supporting Base mainnet ("exact" scheme).
     // No API key required — a drop-in replacement if you later switch to
     // the CDP Facilitator (which additionally unlocks Bazaar auto-indexing).
-    const facilitatorClient = new HTTPFacilitatorClient({
-      url: env.FACILITATOR_URL ?? "https://facilitator.xpay.sh",
-    });
-    const resourceServer = new x402ResourceServer(facilitatorClient)
-      .register(BASE, new ExactEvmScheme())
-      .registerExtension(bazaarResourceServerExtension);
+    //
+    // Built once per isolate rather than per request: constructing the
+    // middleware eagerly calls facilitator.getSupported(), so rebuilding it
+    // on every request fired one outbound subrequest to the facilitator for
+    // every inbound request, including free ones and 404s.
+    if (!gatedApp) {
+      const facilitatorClient = new HTTPFacilitatorClient({
+        url: env.FACILITATOR_URL ?? "https://facilitator.xpay.sh",
+      });
 
-    const httpServer = new x402HTTPResourceServer(resourceServer, routes);
-    const paymentMiddleware = paymentMiddlewareFromHTTPServer(httpServer);
+      // Pre-flight the facilitator. The x402 middleware loads supported
+      // payment kinds on construction and, when that fails, answers every
+      // request with a bare 500 that an agent cannot distinguish from a bug
+      // in its own request. Worse, memoizing that instance would pin the
+      // failure for the lifetime of the isolate. Checking here lets us
+      // return an honest, retryable 503 and rebuild on the next request.
+      try {
+        await facilitatorClient.getSupported();
+      } catch (err) {
+        console.error("Facilitator unreachable:", err);
 
-    // Create a wrapper app that applies payment middleware then delegates
-    const gatedApp = new Hono<{ Bindings: Env }>();
-    gatedApp.use("*", paymentMiddleware);
-    gatedApp.route("/", app);
+        // Only paid paths reach here, so there is nothing serviceable to
+        // fall back to; free routes were already answered above.
+        return Response.json(
+          {
+            error: "Payment facilitator unavailable",
+            detail:
+              "Cannot verify payments right now. Retry shortly. Free endpoints (/ and /health) are unaffected.",
+          },
+          { status: 503, headers: { "Retry-After": "30" } },
+        );
+      }
+      const resourceServer = new x402ResourceServer(facilitatorClient)
+        .register(BASE, new ExactEvmScheme())
+        .registerExtension(bazaarResourceServerExtension);
+
+      const httpServer = new x402HTTPResourceServer(resourceServer, routes);
+      const paymentMiddleware = paymentMiddlewareFromHTTPServer(httpServer);
+
+      const wrapper = new Hono<{ Bindings: Env }>();
+
+      wrapper.use("*", paymentMiddleware);
+      wrapper.route("/", app);
+      gatedApp = wrapper;
+    }
 
     return gatedApp.fetch(request, env, ctx);
   },

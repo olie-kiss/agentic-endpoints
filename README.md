@@ -171,9 +171,12 @@ Paid requests are not rate limited — each one already costs the caller USDC.
   allowlist, private/reserved IPv4 and IPv6 ranges blocked, hostnames resolved
   over DNS-over-HTTPS to defeat rebinding, every redirect hop re-validated, and
   response bodies bounded. It fails closed.
-- **Vault namespaces are ownership-gated.** Tokens are stored only as SHA-256
-  hashes and compared in constant time.
-- **Receipts are HMAC-signed** with `RECEIPT_SECRET`.
+- **Vault and OnceKey namespaces are ownership-gated.** The first request to a
+  namespace is issued a one-time `namespace_token`; tokens are stored only as
+  SHA-256 hashes and compared in constant time.
+- **Receipts are HMAC-signed** with `RECEIPT_SECRET`. Note that only `/once-key`
+  and the vault endpoints return a `receipt` — the stateless utilities
+  (`/pdf-parse`, `/scrape`, `/compress`) do not.
 - **The wallet is the trust anchor.** Nothing in this codebase protects the seed
   phrase behind `X402_PAY_TO`. If it leaks, the money is gone.
 
