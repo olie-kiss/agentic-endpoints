@@ -255,7 +255,7 @@ export function landingPage(): string {
       <div class="endpoint">
         <div class="endpoint-left">
           <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/store</span></div>
-          <div class="endpoint-desc">Store an encrypted item (client-side encryption)</div>
+          <div class="endpoint-desc">Store an encrypted item (client-side encryption). First write claims the namespace and returns a one-time namespace_token</div>
         </div>
         <span class="endpoint-price free">FREE</span>
       </div>
@@ -263,7 +263,7 @@ export function landingPage(): string {
       <div class="endpoint">
         <div class="endpoint-left">
           <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/retrieve</span></div>
-          <div class="endpoint-desc">Retrieve an encrypted item from the vault</div>
+          <div class="endpoint-desc">Retrieve an encrypted item from the vault (requires namespace_token)</div>
         </div>
         <span class="endpoint-price paid">$0.02</span>
       </div>
@@ -271,7 +271,7 @@ export function landingPage(): string {
       <div class="endpoint">
         <div class="endpoint-left">
           <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/delete</span></div>
-          <div class="endpoint-desc">Delete an encrypted item</div>
+          <div class="endpoint-desc">Delete an encrypted item (requires namespace_token)</div>
         </div>
         <span class="endpoint-price free">FREE</span>
       </div>
@@ -279,7 +279,7 @@ export function landingPage(): string {
       <div class="endpoint">
         <div class="endpoint-left">
           <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/exists</span></div>
-          <div class="endpoint-desc">Check if an encrypted item exists</div>
+          <div class="endpoint-desc">Check if an encrypted item exists (requires namespace_token)</div>
         </div>
         <span class="endpoint-price free">FREE</span>
       </div>

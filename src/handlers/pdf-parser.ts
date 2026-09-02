@@ -1,6 +1,11 @@
 import { Hono } from "hono";
 import type { Env, PdfParseRequest } from "../types";
 import { errorResponse } from "../lib/utils";
+import {
+  safeFetch,
+  UnsafeUrlError,
+  UpstreamStatusError,
+} from "../lib/url-guard";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -25,26 +30,18 @@ app.post("/", async (c) => {
   }
 
   try {
-    const res = await fetch(body.url, {
-      headers: {
-        "User-Agent": "AgenticEndpoints/1.0 (pdf-parse)",
-      },
-    });
+    const result = await safeFetch(
+      body.url,
+      { headers: { "User-Agent": "AgenticEndpoints/1.0 (pdf-parse)" } },
+      { maxBytes: 10_000_000 },
+    );
 
-    if (!res.ok) {
-      return errorResponse(`Upstream returned ${res.status}`, 502);
+    if (!result.contentType.includes("pdf")) {
+      // Don't echo the upstream content-type — it fingerprints internal services.
+      return errorResponse("URL did not return a PDF", 400);
     }
 
-    const contentType = res.headers.get("content-type") ?? "";
-    if (!contentType.includes("pdf")) {
-      return errorResponse(
-        `Expected PDF, got ${contentType}`,
-        400,
-      );
-    }
-
-    const buffer = await res.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
+    const bytes = result.bytes;
 
     // Basic PDF text extraction — pulls text between stream markers.
     // This handles simple PDFs. Production should use a WASM PDF parser.
@@ -57,10 +54,14 @@ app.post("/", async (c) => {
       extracted_at: new Date().toISOString(),
     });
   } catch (err) {
-    return errorResponse(
-      `PDF parse failed: ${err instanceof Error ? err.message : "unknown error"}`,
-      502,
-    );
+    if (err instanceof UnsafeUrlError) {
+      return errorResponse(err.message, 400);
+    }
+    if (err instanceof UpstreamStatusError) {
+      return errorResponse(err.message, 502);
+    }
+    // Avoid reflecting raw network errors — they are an internal-host probe oracle.
+    return errorResponse("PDF parse failed", 502);
   }
 });
 

@@ -73,25 +73,27 @@ app.get("/", (c) => {
           path: "/vault/store",
           method: "POST",
           price: "free",
-          description: "Store an encrypted item (client-side encryption)",
+          description:
+            "Store an encrypted item (client-side encryption). The first write to a namespace returns a one-time namespace_token required for all later operations.",
         },
         {
           path: "/vault/retrieve",
           method: "POST",
           price: "$0.02",
-          description: "Retrieve an encrypted item",
+          description: "Retrieve an encrypted item (requires namespace_token)",
         },
         {
           path: "/vault/delete",
           method: "POST",
           price: "free",
-          description: "Delete an encrypted item",
+          description: "Delete an encrypted item (requires namespace_token)",
         },
         {
           path: "/vault/exists",
           method: "POST",
           price: "free",
-          description: "Check if an encrypted item exists",
+          description:
+            "Check if an encrypted item exists (requires namespace_token)",
         },
       ],
     });
@@ -281,7 +283,8 @@ export default {
           payTo: env.X402_PAY_TO,
           price: "$0.02",
         },
-        description: "Retrieve an encrypted item from the vault",
+        description:
+          "Retrieve an encrypted item from the vault (requires the namespace_token issued at claim time)",
         extensions: declareDiscoveryExtension({
           bodyType: "json",
           inputSchema: {
@@ -292,8 +295,13 @@ export default {
                 description: "Vault isolation scope",
               },
               key: { type: "string", description: "Item key to retrieve" },
+              namespace_token: {
+                type: "string",
+                description:
+                  "One-time token issued by the first /vault/store call that claimed this namespace",
+              },
             },
-            required: ["namespace", "key"],
+            required: ["namespace", "key", "namespace_token"],
           },
           output: {
             example: {

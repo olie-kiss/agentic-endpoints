@@ -19,6 +19,7 @@ app.post("/store", async (c) => {
     ciphertext: string;
     alg?: string;
     ttl?: number;
+    namespace_token?: string;
   }>();
 
   if (!body.namespace || !body.key || !body.ciphertext) {
@@ -37,11 +38,16 @@ app.post("/store", async (c) => {
         ciphertext: body.ciphertext,
         alg: body.alg,
         ttl: body.ttl,
+        namespace_token: body.namespace_token,
       }),
     }),
   );
 
   const result = await doResponse.json<Record<string, unknown>>();
+
+  if (!doResponse.ok) {
+    return c.json(result, doResponse.status as 400 | 403 | 404);
+  }
 
   const receipt = await signReceipt(
     { ...result, namespace: body.namespace },
@@ -59,7 +65,11 @@ app.post("/store", async (c) => {
  * Body: { namespace, key }
  */
 app.post("/retrieve", async (c) => {
-  const body = await c.req.json<{ namespace: string; key: string }>();
+  const body = await c.req.json<{
+    namespace: string;
+    key: string;
+    namespace_token?: string;
+  }>();
 
   if (!body.namespace || !body.key) {
     return errorResponse("namespace and key are required", 400);
@@ -72,14 +82,17 @@ app.post("/retrieve", async (c) => {
     new Request("https://internal/retrieve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: body.key }),
+      body: JSON.stringify({
+        key: body.key,
+        namespace_token: body.namespace_token,
+      }),
     }),
   );
 
   const result = await doResponse.json<Record<string, unknown>>();
 
-  if (doResponse.status === 404) {
-    return c.json(result, 404);
+  if (!doResponse.ok) {
+    return c.json(result, doResponse.status as 400 | 403 | 404);
   }
 
   const receipt = await signReceipt(
@@ -98,7 +111,11 @@ app.post("/retrieve", async (c) => {
  * Body: { namespace, key }
  */
 app.post("/delete", async (c) => {
-  const body = await c.req.json<{ namespace: string; key: string }>();
+  const body = await c.req.json<{
+    namespace: string;
+    key: string;
+    namespace_token?: string;
+  }>();
 
   if (!body.namespace || !body.key) {
     return errorResponse("namespace and key are required", 400);
@@ -111,14 +128,17 @@ app.post("/delete", async (c) => {
     new Request("https://internal/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: body.key }),
+      body: JSON.stringify({
+        key: body.key,
+        namespace_token: body.namespace_token,
+      }),
     }),
   );
 
   const result = await doResponse.json<Record<string, unknown>>();
 
-  if (doResponse.status === 404) {
-    return c.json(result, 404);
+  if (!doResponse.ok) {
+    return c.json(result, doResponse.status as 400 | 403 | 404);
   }
 
   return c.json({ ...result, namespace: body.namespace });
@@ -132,7 +152,11 @@ app.post("/delete", async (c) => {
  * Body: { namespace, key }
  */
 app.post("/exists", async (c) => {
-  const body = await c.req.json<{ namespace: string; key: string }>();
+  const body = await c.req.json<{
+    namespace: string;
+    key: string;
+    namespace_token?: string;
+  }>();
 
   if (!body.namespace || !body.key) {
     return errorResponse("namespace and key are required", 400);
@@ -145,11 +169,19 @@ app.post("/exists", async (c) => {
     new Request("https://internal/exists", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: body.key }),
+      body: JSON.stringify({
+        key: body.key,
+        namespace_token: body.namespace_token,
+      }),
     }),
   );
 
   const result = await doResponse.json<Record<string, unknown>>();
+
+  if (!doResponse.ok) {
+    return c.json(result, doResponse.status as 400 | 403 | 404);
+  }
+
   return c.json({ ...result, namespace: body.namespace });
 });
 

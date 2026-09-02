@@ -1,11 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types";
+import { generateToken, hashToken, timingSafeEqual } from "../lib/utils";
 
 /**
  * Vault — Encrypted key-value store backed by Durable Object SQLite.
  *
- * Each unique {namespace} gets its own Durable Object instance.
- * Storing encrypted items is free; retrieval is paid via x402.
+ * Each unique {namespace} gets its own Durable Object instance and is owned by
+ * whoever first writes to it: that first store issues a one-time namespace
+ * token, and every later operation on the namespace must present it. Without
+ * this, any anonymous caller could overwrite or delete another tenant's data,
+ * since namespaces are just caller-supplied strings.
  */
 export class Vault extends DurableObject<Env> {
   private initialized = false;
@@ -22,7 +26,51 @@ export class Vault extends DurableObject<Env> {
         expires_at   TEXT
       )
     `);
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS namespace_meta (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        token_hash   TEXT NOT NULL,
+        claimed_at   TEXT NOT NULL
+      )
+    `);
     this.initialized = true;
+  }
+
+  private getOwnerHash(): string | null {
+    const rows = this.ctx.storage.sql
+      .exec(`SELECT token_hash FROM namespace_meta WHERE id = 1`)
+      .toArray();
+    return rows.length > 0 ? (rows[0].token_hash as string) : null;
+  }
+
+  /**
+   * Strict ownership check: the namespace must already be claimed and the
+   * caller must present the matching token. Used for read/delete operations,
+   * so an unclaimed namespace and a wrong token are indistinguishable.
+   */
+  private async isOwner(token: string | undefined): Promise<boolean> {
+    const ownerHash = this.getOwnerHash();
+    if (ownerHash === null || !token) return false;
+    return timingSafeEqual(await hashToken(token), ownerHash);
+  }
+
+  /**
+   * Verify a caller-supplied token against the namespace owner hash.
+   * Returns true when the namespace is unclaimed (caller is about to claim it).
+   */
+  private async isAuthorized(token: string | undefined): Promise<boolean> {
+    if (this.getOwnerHash() === null) return true;
+    return this.isOwner(token);
+  }
+
+  private unauthorized(): Response {
+    return Response.json(
+      {
+        error:
+          "Invalid or missing namespace_token for this namespace",
+      },
+      { status: 403 },
+    );
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -50,6 +98,7 @@ export class Vault extends DurableObject<Env> {
       ciphertext: string;
       alg?: string;
       ttl?: number;
+      namespace_token?: string;
     }>();
 
     if (!body.key || !body.ciphertext) {
@@ -60,6 +109,24 @@ export class Vault extends DurableObject<Env> {
     }
 
     this.ensureTable();
+
+    if (!(await this.isAuthorized(body.namespace_token))) {
+      return this.unauthorized();
+    }
+
+    // First write claims the namespace and issues a one-time owner token.
+    let issuedToken: string | undefined;
+    if (this.getOwnerHash() === null) {
+      issuedToken = body.namespace_token ?? generateToken();
+      this.ctx.storage.sql.exec(
+        `INSERT INTO namespace_meta (id, token_hash, claimed_at)
+         VALUES (1, ?, ?)`,
+        await hashToken(issuedToken),
+        new Date().toISOString(),
+      );
+      // Only surface a token the caller didn't already choose.
+      if (body.namespace_token) issuedToken = undefined;
+    }
 
     const now = new Date();
     const expiresAt = body.ttl
@@ -89,11 +156,21 @@ export class Vault extends DurableObject<Env> {
       alg: body.alg ?? "aes-256-gcm",
       created_at: now.toISOString(),
       expires_at: expiresAt,
+      ...(issuedToken
+        ? {
+            namespace_token: issuedToken,
+            notice:
+              "Save this namespace_token — it is shown only once and is required for all future operations on this namespace.",
+          }
+        : {}),
     });
   }
 
   private async handleRetrieve(request: Request): Promise<Response> {
-    const body = await request.json<{ key: string }>();
+    const body = await request.json<{
+      key: string;
+      namespace_token?: string;
+    }>();
 
     if (!body.key) {
       return Response.json(
@@ -103,6 +180,10 @@ export class Vault extends DurableObject<Env> {
     }
 
     this.ensureTable();
+
+    if (!(await this.isOwner(body.namespace_token))) {
+      return this.unauthorized();
+    }
 
     // Purge expired items
     this.ctx.storage.sql.exec(
@@ -134,7 +215,10 @@ export class Vault extends DurableObject<Env> {
   }
 
   private async handleDelete(request: Request): Promise<Response> {
-    const body = await request.json<{ key: string }>();
+    const body = await request.json<{
+      key: string;
+      namespace_token?: string;
+    }>();
 
     if (!body.key) {
       return Response.json(
@@ -144,6 +228,10 @@ export class Vault extends DurableObject<Env> {
     }
 
     this.ensureTable();
+
+    if (!(await this.isOwner(body.namespace_token))) {
+      return this.unauthorized();
+    }
 
     const existing = this.ctx.storage.sql
       .exec(`SELECT key FROM items WHERE key = ?`, body.key)
@@ -162,7 +250,10 @@ export class Vault extends DurableObject<Env> {
   }
 
   private async handleExists(request: Request): Promise<Response> {
-    const body = await request.json<{ key: string }>();
+    const body = await request.json<{
+      key: string;
+      namespace_token?: string;
+    }>();
 
     if (!body.key) {
       return Response.json(
@@ -172,6 +263,11 @@ export class Vault extends DurableObject<Env> {
     }
 
     this.ensureTable();
+
+    // Gated: an ungated existence check is a free enumeration oracle.
+    if (!(await this.isOwner(body.namespace_token))) {
+      return this.unauthorized();
+    }
 
     // Purge expired
     this.ctx.storage.sql.exec(

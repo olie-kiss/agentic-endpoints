@@ -1,6 +1,11 @@
 import { Hono } from "hono";
 import type { Env, ScrapeRequest } from "../types";
 import { errorResponse } from "../lib/utils";
+import {
+  safeFetch,
+  UnsafeUrlError,
+  UpstreamStatusError,
+} from "../lib/url-guard";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -19,41 +24,16 @@ app.post("/", async (c) => {
     return errorResponse("url is required", 400);
   }
 
-  let targetUrl: URL;
   try {
-    targetUrl = new URL(body.url);
-  } catch {
-    return errorResponse("Invalid URL", 400);
-  }
-
-  // Block internal/private ranges
-  if (
-    targetUrl.hostname === "localhost" ||
-    targetUrl.hostname.startsWith("127.") ||
-    targetUrl.hostname.startsWith("10.") ||
-    targetUrl.hostname.startsWith("192.168.")
-  ) {
-    return errorResponse("Private URLs are not allowed", 403);
-  }
-
-  try {
-    const res = await fetch(targetUrl.toString(), {
+    const result = await safeFetch(body.url, {
       headers: {
         "User-Agent":
           "AgenticEndpoints/1.0 (scrape-pay; +https://github.com/agentic-endpoints)",
         Accept: "text/html,application/xhtml+xml,*/*",
       },
-      redirect: "follow",
     });
 
-    if (!res.ok) {
-      return errorResponse(
-        `Upstream returned ${res.status}`,
-        502,
-      );
-    }
-
-    const html = await res.text();
+    const html = new TextDecoder("utf-8").decode(result.bytes);
     const format = body.format ?? "text";
 
     let content: string;
@@ -81,10 +61,14 @@ app.post("/", async (c) => {
       extracted_at: new Date().toISOString(),
     });
   } catch (err) {
-    return errorResponse(
-      `Scrape failed: ${err instanceof Error ? err.message : "unknown error"}`,
-      502,
-    );
+    if (err instanceof UnsafeUrlError) {
+      return errorResponse(err.message, 400);
+    }
+    if (err instanceof UpstreamStatusError) {
+      return errorResponse(err.message, 502);
+    }
+    // Avoid reflecting raw network errors — they are an internal-host probe oracle.
+    return errorResponse("Scrape failed", 502);
   }
 });
 

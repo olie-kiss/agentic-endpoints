@@ -79,11 +79,14 @@ export interface VaultStoreRequest {
   ciphertext: string;
   alg?: string;
   ttl?: number; // seconds
+  /** Required once the namespace has been claimed by a first write. */
+  namespace_token?: string;
 }
 
 export interface VaultRetrieveRequest {
   namespace: string;
   key: string;
+  namespace_token: string;
 }
 
 export interface VaultStoreResult {
@@ -94,6 +97,9 @@ export interface VaultStoreResult {
   created_at: string;
   expires_at: string | null;
   receipt: string;
+  /** Returned only on the first write, which claims the namespace. */
+  namespace_token?: string;
+  notice?: string;
 }
 
 export interface VaultRetrieveResult {
