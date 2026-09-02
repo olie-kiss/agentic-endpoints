@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { Env } from "../types";
 import { signReceipt, errorResponse } from "../lib/utils";
 
@@ -46,7 +47,7 @@ app.post("/store", async (c) => {
   const result = await doResponse.json<Record<string, unknown>>();
 
   if (!doResponse.ok) {
-    return c.json(result, doResponse.status as 400 | 403 | 404);
+    return c.json(result, doResponse.status as ContentfulStatusCode);
   }
 
   const receipt = await signReceipt(
@@ -92,7 +93,7 @@ app.post("/retrieve", async (c) => {
   const result = await doResponse.json<Record<string, unknown>>();
 
   if (!doResponse.ok) {
-    return c.json(result, doResponse.status as 400 | 403 | 404);
+    return c.json(result, doResponse.status as ContentfulStatusCode);
   }
 
   const receipt = await signReceipt(
@@ -138,7 +139,7 @@ app.post("/delete", async (c) => {
   const result = await doResponse.json<Record<string, unknown>>();
 
   if (!doResponse.ok) {
-    return c.json(result, doResponse.status as 400 | 403 | 404);
+    return c.json(result, doResponse.status as ContentfulStatusCode);
   }
 
   return c.json({ ...result, namespace: body.namespace });
@@ -179,7 +180,7 @@ app.post("/exists", async (c) => {
   const result = await doResponse.json<Record<string, unknown>>();
 
   if (!doResponse.ok) {
-    return c.json(result, doResponse.status as 400 | 403 | 404);
+    return c.json(result, doResponse.status as ContentfulStatusCode);
   }
 
   return c.json({ ...result, namespace: body.namespace });

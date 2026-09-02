@@ -41,3 +41,23 @@ new_sqlite_classes = ["OnceKey"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Vault"]
+
+# ── Rate Limiting ──────────────────────────────────────────────────
+# Per-Cloudflare-location limits. Free endpoints are the abuse surface,
+# since paid ones are already gated behind an on-chain payment.
+[[ratelimits]]
+name = "FREE_RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+# Vault writes consume durable storage, so they get a tighter budget.
+[[ratelimits]]
+name = "WRITE_RATE_LIMITER"
+namespace_id = "1002"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60

@@ -30,6 +30,71 @@ const app = new Hono<{ Bindings: Env }>();
 // ── Global middleware ─────────────────────────────────────────────
 app.use("*", cors());
 
+/**
+ * Rate limiting.
+ *
+ * Paid requests are self-limiting — each one costs the caller real USDC.
+ * The abuse surface is everything else: the free vault operations and the
+ * unauthenticated 402 challenge, both of which anyone can spam for nothing.
+ * So we meter by client IP and only when no payment is attached.
+ */
+app.use("*", async (c, next) => {
+  if (c.req.header("X-PAYMENT")) return next();
+
+  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  const { success } = await c.env.FREE_RATE_LIMITER.limit({ key: ip });
+  if (!success) {
+    return c.json(
+      {
+        error: "Rate limit exceeded",
+        detail: "Too many free requests. Retry shortly.",
+      },
+      429,
+      { "Retry-After": "60" },
+    );
+  }
+  return next();
+});
+
+/**
+ * Reject oversized request bodies before anything tries to buffer them.
+ * Every handler here reads the full body into memory, so an unbounded
+ * payload is a cheap way to burn our CPU and memory limits.
+ */
+const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB
+
+app.use("*", async (c, next) => {
+  const declared = c.req.header("Content-Length");
+  if (declared && Number(declared) > MAX_BODY_BYTES) {
+    return c.json(
+      {
+        error: "Request body too large",
+        detail: `Maximum body size is ${MAX_BODY_BYTES} bytes.`,
+      },
+      413,
+    );
+  }
+  return next();
+});
+
+// Vault writes additionally consume durable storage, so they cost more
+// than CPU time and get their own tighter budget.
+app.use("/vault/store", async (c, next) => {
+  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  const { success } = await c.env.WRITE_RATE_LIMITER.limit({ key: ip });
+  if (!success) {
+    return c.json(
+      {
+        error: "Rate limit exceeded",
+        detail: "Too many vault writes. Retry shortly.",
+      },
+      429,
+      { "Retry-After": "60" },
+    );
+  }
+  return next();
+});
+
 // ── Health / discovery ────────────────────────────────────────────
 app.get("/", (c) => {
   const accept = c.req.header("Accept") ?? "";

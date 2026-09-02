@@ -6,6 +6,7 @@ import {
   UnsafeUrlError,
   UpstreamStatusError,
 } from "../lib/url-guard";
+import { extractPdfText } from "../lib/pdf";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -18,9 +19,10 @@ const app = new Hono<{ Bindings: Env }>();
  *
  * Body: { url, pages? }
  *
- * NOTE: This is a starter implementation using basic PDF text extraction.
- * For production, integrate a proper PDF library (pdf-parse, pdfjs-dist)
- * or offload to a Cloudflare Worker with WASM-compiled parser.
+ * Text extraction lives in ../lib/pdf. When a document yields no text
+ * (encrypted, or a scan with no text layer) this returns a 4xx rather than
+ * a success with filler content, so the caller is not billed for a result
+ * we know is useless.
  */
 app.post("/", async (c) => {
   const body = await c.req.json<PdfParseRequest>();
@@ -41,16 +43,39 @@ app.post("/", async (c) => {
       return errorResponse("URL did not return a PDF", 400);
     }
 
-    const bytes = result.bytes;
+    const extraction = await extractPdfText(result.bytes);
 
-    // Basic PDF text extraction — pulls text between stream markers.
-    // This handles simple PDFs. Production should use a WASM PDF parser.
-    const text = extractTextFromPdf(bytes);
+    if (extraction.reason) {
+      const reasons: Record<string, string> = {
+        encrypted:
+          "PDF is encrypted — its content streams cannot be decrypted without the password",
+        "no-text":
+          "PDF contains no extractable text layer (it is likely a scan or image-only document)",
+        unsupported: "File is not a valid PDF",
+      };
+      return errorResponse(
+        reasons[extraction.reason] ?? "PDF contains no extractable text",
+        extraction.reason === "unsupported" ? 400 : 422,
+      );
+    }
+
+    // Optional page filter, 1-indexed to match how PDFs are numbered.
+    let pages = extraction.pages;
+    if (body.pages?.length) {
+      const wanted = new Set(body.pages);
+      pages = pages.filter((p) => wanted.has(p.page));
+      if (pages.length === 0) {
+        return errorResponse(
+          `None of the requested pages exist (document has ${extraction.pages.length} pages)`,
+          400,
+        );
+      }
+    }
 
     return c.json({
       url: body.url,
-      page_count: 1, // basic extractor doesn't split pages
-      pages: [{ page: 1, text }],
+      page_count: extraction.pages.length,
+      pages,
       extracted_at: new Date().toISOString(),
     });
   } catch (err) {
@@ -64,39 +89,5 @@ app.post("/", async (c) => {
     return errorResponse("PDF parse failed", 502);
   }
 });
-
-/**
- * Naive PDF text extractor. Pulls readable ASCII/UTF-8 strings
- * from the raw PDF binary. Good enough for simple text-based PDFs.
- *
- * TODO: Replace with a WASM-compiled PDF parser for production use.
- */
-function extractTextFromPdf(bytes: Uint8Array): string {
-  const raw = new TextDecoder("utf-8").decode(bytes);
-  const textParts: string[] = [];
-
-  // Extract text from PDF text objects: BT ... ET blocks
-  const btEtRegex = /BT\s([\s\S]*?)ET/g;
-  let match;
-  while ((match = btEtRegex.exec(raw)) !== null) {
-    const block = match[1];
-    // Extract parenthesized strings: (text here)
-    const parenRegex = /\(([^)]*)\)/g;
-    let textMatch;
-    while ((textMatch = parenRegex.exec(block)) !== null) {
-      const cleaned = textMatch[1]
-        .replace(/\\n/g, "\n")
-        .replace(/\\r/g, "")
-        .replace(/\\\(/g, "(")
-        .replace(/\\\)/g, ")")
-        .replace(/\\\\/g, "\\");
-      if (cleaned.trim()) {
-        textParts.push(cleaned);
-      }
-    }
-  }
-
-  return textParts.join(" ") || "[No extractable text found — PDF may use embedded fonts or images]";
-}
 
 export default app;

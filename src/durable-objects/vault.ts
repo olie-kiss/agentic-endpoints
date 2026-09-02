@@ -11,6 +11,15 @@ import { generateToken, hashToken, timingSafeEqual } from "../lib/utils";
  * this, any anonymous caller could overwrite or delete another tenant's data,
  * since namespaces are just caller-supplied strings.
  */
+/**
+ * Storage quotas. Writes are free, so without a ceiling a single caller
+ * could fill Durable Object storage at our expense.
+ */
+const MAX_CIPHERTEXT_BYTES = 256 * 1024; // 256 KiB per item
+const MAX_KEY_LENGTH = 512;
+const MAX_ITEMS_PER_NAMESPACE = 1000;
+const MAX_NAMESPACE_BYTES = 25 * 1024 * 1024; // 25 MiB total per namespace
+
 export class Vault extends DurableObject<Env> {
   private initialized = false;
 
@@ -63,6 +72,27 @@ export class Vault extends DurableObject<Env> {
     return this.isOwner(token);
   }
 
+  /** Drop expired items so they don't count against the namespace quota. */
+  private purgeExpired() {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM items WHERE expires_at IS NOT NULL AND expires_at < ?`,
+      new Date().toISOString(),
+    );
+  }
+
+  private usage(): { count: number; bytes: number } {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(ciphertext)), 0) AS bytes
+         FROM items`,
+      )
+      .toArray();
+    return {
+      count: Number(rows[0]?.count ?? 0),
+      bytes: Number(rows[0]?.bytes ?? 0),
+    };
+  }
+
   private unauthorized(): Response {
     return Response.json(
       {
@@ -108,10 +138,54 @@ export class Vault extends DurableObject<Env> {
       );
     }
 
+    if (body.key.length > MAX_KEY_LENGTH) {
+      return Response.json(
+        { error: `key exceeds ${MAX_KEY_LENGTH} characters` },
+        { status: 400 },
+      );
+    }
+
+    if (body.ciphertext.length > MAX_CIPHERTEXT_BYTES) {
+      return Response.json(
+        {
+          error: `ciphertext exceeds the ${MAX_CIPHERTEXT_BYTES}-byte per-item limit`,
+        },
+        { status: 413 },
+      );
+    }
+
     this.ensureTable();
 
     if (!(await this.isAuthorized(body.namespace_token))) {
       return this.unauthorized();
+    }
+
+    // Quotas are checked before the namespace is claimed. Claiming first
+    // would mint a token we then never return, permanently bricking the
+    // namespace for its rightful owner.
+    this.purgeExpired();
+    const existing = this.ctx.storage.sql
+      .exec(`SELECT LENGTH(ciphertext) AS bytes FROM items WHERE key = ?`, body.key)
+      .toArray();
+    const replacedBytes = Number(existing[0]?.bytes ?? 0);
+    const { count, bytes } = this.usage();
+
+    if (existing.length === 0 && count >= MAX_ITEMS_PER_NAMESPACE) {
+      return Response.json(
+        {
+          error: `namespace holds the maximum of ${MAX_ITEMS_PER_NAMESPACE} items`,
+        },
+        { status: 507 },
+      );
+    }
+
+    if (bytes - replacedBytes + body.ciphertext.length > MAX_NAMESPACE_BYTES) {
+      return Response.json(
+        {
+          error: `namespace would exceed its ${MAX_NAMESPACE_BYTES}-byte storage quota`,
+        },
+        { status: 507 },
+      );
     }
 
     // First write claims the namespace and issues a one-time owner token.
