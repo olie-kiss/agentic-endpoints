@@ -18,6 +18,7 @@ import onceKeyHandler from "./handlers/once-key";
 import webScraperHandler from "./handlers/web-scraper";
 import pdfParserHandler from "./handlers/pdf-parser";
 import tokenCompressorHandler from "./handlers/token-compressor";
+import mcpHandler, { type Dispatcher } from "./handlers/mcp";
 import vaultHandler from "./handlers/vault";
 import { landingPage } from "./pages/landing";
 
@@ -25,7 +26,7 @@ import { landingPage } from "./pages/landing";
 export { OnceKey } from "./durable-objects/once-key";
 export { Vault } from "./durable-objects/vault";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { dispatch: Dispatcher } }>();
 
 // ── Global middleware ─────────────────────────────────────────────
 app.use("*", cors());
@@ -98,7 +99,7 @@ app.get("/", (c) => {
         {
           path: "/vault/store",
           method: "POST",
-          price: "free",
+          price: "$0.02",
           description:
             "Store an encrypted item (client-side encryption). The first write to a namespace returns a one-time namespace_token required for all later operations.",
         },
@@ -111,15 +112,22 @@ app.get("/", (c) => {
         {
           path: "/vault/delete",
           method: "POST",
-          price: "free",
+          price: "$0.005",
           description: "Delete an encrypted item (requires namespace_token)",
         },
         {
           path: "/vault/exists",
           method: "POST",
-          price: "free",
+          price: "$0.001",
           description:
             "Check if an encrypted item exists (requires namespace_token)",
+        },
+        {
+          path: "/mcp",
+          method: "POST",
+          price: "free to list, per-tool price to call",
+          description:
+            "Remote MCP server (Streamable HTTP). tools/list is free; each tool re-enters the paid route above and returns its x402 payment demand until paid.",
         },
         {
           path: "/",
@@ -173,6 +181,21 @@ app.route("/pdf-parse", pdfParserHandler);
 app.route("/compress", tokenCompressorHandler);
 app.route("/vault", vaultHandler);
 
+// Free: tool discovery must be reachable or no MCP client can find us. The
+// tools themselves re-enter through the paid HTTP routes, dispatched in-process
+// rather than fetched over the public hostname: a loopback subrequest would
+// cost an extra round trip, be unreachable from tests, and re-run the limiter.
+app.use("/mcp", async (c, next) => {
+  c.set("dispatch", (req: Request) => {
+    req.headers.set(INTERNAL_HEADER, "1");
+    // Hono models ExecutionContext structurally and lags the workers-types
+    // definition; it is the same object at runtime.
+    return handleRequest(req, c.env, c.executionCtx as unknown as ExecutionContext);
+  });
+  await next();
+});
+app.route("/mcp", mcpHandler);
+
 // ── Export with x402 payment layer ────────────────────────────────
 
 /**
@@ -182,12 +205,19 @@ app.route("/vault", vaultHandler);
  */
 let gatedApp: Hono<{ Bindings: Env }> | null = null;
 
-export default {
-  async fetch(
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ): Promise<Response> {
+/**
+ * Marks a request that this Worker generated for itself. The MCP handler
+ * re-enters the pipeline to reach the paid routes; without this the caller
+ * would be metered twice for a single tool call.
+ */
+const INTERNAL_HEADER = "X-Internal-Dispatch";
+
+async function handleRequest(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  {
     const BASE = "eip155:8453"; // Base mainnet
 
     // x402 route pricing config — maps route patterns to payment requirements,
@@ -523,8 +553,11 @@ export default {
      * unpaid traffic it was meant to bound. An X-PAYMENT header is
      * unverified attacker-controlled input here and grants no exemption.
      */
+    const internal = request.headers.get(INTERNAL_HEADER) === "1";
     const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-    const { success } = await env.FREE_RATE_LIMITER.limit({ key: ip });
+    const { success } = internal
+      ? { success: true }
+      : await env.FREE_RATE_LIMITER.limit({ key: ip });
     if (!success) {
       return Response.json(
         {
@@ -603,5 +636,7 @@ export default {
     }
 
     return gatedApp.fetch(request, env, ctx);
-  },
-};
+  }
+}
+
+export default { fetch: handleRequest };

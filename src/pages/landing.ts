@@ -257,7 +257,7 @@ export function landingPage(): string {
           <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/store</span></div>
           <div class="endpoint-desc">Store an encrypted item (client-side encryption). First write claims the namespace and returns a one-time namespace_token</div>
         </div>
-        <span class="endpoint-price free">FREE</span>
+        <span class="endpoint-price paid">$0.02</span>
       </div>
 
       <div class="endpoint">
@@ -273,7 +273,7 @@ export function landingPage(): string {
           <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/delete</span></div>
           <div class="endpoint-desc">Delete an encrypted item (requires namespace_token)</div>
         </div>
-        <span class="endpoint-price free">FREE</span>
+        <span class="endpoint-price paid">$0.005</span>
       </div>
 
       <div class="endpoint">
@@ -281,8 +281,29 @@ export function landingPage(): string {
           <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/exists</span></div>
           <div class="endpoint-desc">Check if an encrypted item exists (requires namespace_token)</div>
         </div>
-        <span class="endpoint-price free">FREE</span>
+        <span class="endpoint-price paid">$0.001</span>
       </div>
+
+      <div class="endpoint">
+        <div class="endpoint-left">
+          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/mcp</span></div>
+          <div class="endpoint-desc">Remote MCP server (Streamable HTTP). Listing tools is free; calling one costs that tool's price</div>
+        </div>
+        <span class="endpoint-price free">FREE TO LIST</span>
+      </div>
+    </div>
+
+    <div class="code-section">
+      <h2>Use as an MCP server</h2>
+      <div class="code-block"><span class="cmt">// Add to any MCP client (Claude Desktop, Copilot CLI, Cursor)</span>
+{
+  <span class="str">"mcpServers"</span>: {
+    <span class="str">"agentic-endpoints"</span>: {
+      <span class="str">"type"</span>: <span class="str">"http"</span>,
+      <span class="str">"url"</span>: <span class="str">"https://ai.oliverkiss.com/mcp"</span>
+    }
+  }
+}</div>
     </div>
 
     <div class="code-section">

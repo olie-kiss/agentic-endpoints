@@ -12,10 +12,11 @@ Live at **https://ai.oliverkiss.com**
 | `/scrape` | POST | $0.005 | Web scraping and text extraction |
 | `/pdf-parse` | POST | $0.01 | PDF text extraction from a URL |
 | `/compress` | POST | $0.005 | Token compression / context reduction for LLMs |
-| `/vault/store` | POST | Free | Store a client-encrypted item |
+| `/vault/store` | POST | $0.02 | Store a client-encrypted item |
 | `/vault/retrieve` | POST | $0.02 | Retrieve a client-encrypted item |
-| `/vault/delete` | POST | Free | Delete an item |
-| `/vault/exists` | POST | Free | Check whether an item exists |
+| `/vault/delete` | POST | $0.005 | Delete an item |
+| `/vault/exists` | POST | $0.001 | Check whether an item exists |
+| `/mcp` | POST | Free to list | Remote MCP server; each tool costs its route's price |
 | `/` | GET | Free | Service discovery (JSON) or landing page (HTML) |
 | `/health` | GET | Free | Health check |
 
@@ -36,6 +37,27 @@ curl -i -X POST https://ai.oliverkiss.com/once-key \
   -H 'Content-Type: application/json' \
   -d '{"namespace":"demo","action_key":"abc123"}'
 ```
+
+## MCP Server
+
+Every paid endpoint is also exposed as an MCP tool over Streamable HTTP at
+`https://ai.oliverkiss.com/mcp`, implementing revision `2026-07-28` (stateless:
+no `initialize` handshake, no session header) with a fallback for clients still
+sending the `2025-06-18` handshake.
+
+```json
+{
+  "mcpServers": {
+    "agentic-endpoints": { "type": "http", "url": "https://ai.oliverkiss.com/mcp" }
+  }
+}
+```
+
+`tools/list` is free so clients can discover the catalogue. `tools/call`
+re-enters the corresponding paid route in-process, so it passes the same x402
+gate, body cap and validation as a direct HTTP call. Without a valid
+`X-PAYMENT` header the tool returns `isError: true` and a machine-readable
+payment demand (price, `payTo`, asset, network) rather than performing work.
 
 ## Stack
 
