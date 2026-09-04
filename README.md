@@ -111,7 +111,7 @@ CDP Bazaar is skipped for exactly that reason.
 
 | Catalog | Status | How |
 |---|---|---|
-| PayAI Bazaar | **Not listed** | Believed automatic for a long time; it is not. Paging the whole catalogue found 0 of 28,095 entries were ours. PayAI indexes a resource only when a payment **verifies successfully**, and every verify so far has failed on `insufficient_balance`. Needs ~$1 of USDC in a payer wallet, not a code change |
+| PayAI Bazaar | Not listed on mainnet — **mechanism proven on testnet** | Listing requires a payment that *settles*, once per route; reaching `/verify` does nothing. Confirmed on Base Sepolia: all 9 routes appeared in `/discovery/resources` within seconds of paying. `X402_TEST_PRIVATE_KEY=0x... node scripts/trigger-indexing.mjs` costs **$0.068** for the whole catalogue |
 | x402-list.com | Submitted, pending review | `POST /api/v1/submit`; free because the service is on a custom domain |
 | Official MCP Registry | Pending DNS record | `./scripts/publish-registry.sh` (verified: validates the manifest, fails cleanly until the TXT record exists) |
 | Smithery | Not yet | `smithery mcp publish https://ai.oliverkiss.com/mcp -n @olie-kiss/agentic-endpoints` (needs a browser login) |
@@ -262,6 +262,33 @@ node scripts/trigger-indexing.mjs
 export X402_TEST_PRIVATE_KEY=0x...
 node scripts/paid-test.mjs /compress
 ```
+
+### Proving settlement without spending
+
+Settlement is the one step that cannot be tested by inspection, and on
+mainnet every attempt costs real USDC. `[env.testnet]` deploys the same code
+to a workers.dev URL priced in Base Sepolia USDC, which
+[faucet.circle.com](https://faucet.circle.com) gives away with no account.
+
+```bash
+npx wrangler deploy --env testnet
+X402_TEST_PRIVATE_KEY=0x... node scripts/paid-test.mjs /once-key \
+  https://agentic-endpoints-testnet.<subdomain>.workers.dev --testnet
+```
+
+Only the exact string `eip155:84532` selects Sepolia; anything unrecognised
+falls back to mainnet. That asymmetry is deliberate — a Worker that wrongly
+demanded testnet tokens would hand out real work for money anyone can mint.
+
+### Announcing to the Bazaar
+
+```bash
+X402_TEST_PRIVATE_KEY=0x... node scripts/trigger-indexing.mjs
+```
+
+Pays for each route once, which is what puts it in the catalogue. $0.068 for
+all 9 utility routes; credit packs are excluded unless you pass
+`--include-credits`.
 
 ## API Examples
 
@@ -435,13 +462,16 @@ services such as Mercury and Sphere Pay are not an option.
 
 ## Known Gaps
 
-- **No payment has ever settled.** Revenue is $0.00. The pipeline is verified
-  end to end as far as broadcast (`node scripts/paid-test.mjs --allow-unfunded
-  /compress`), and fails only on `insufficient_balance` — but the last step is
-  unproven until a real payment lands.
-- **Not in the PayAI Bazaar.** Long assumed to be automatic; it is not. Paging
-  the full catalogue found 0 of 28,095 entries were ours. PayAI indexes only on
-  a *successful* verify, so this needs ~$1 of USDC, not a code change.
+- **No payment has settled on mainnet.** Revenue is $0.00. Settlement itself is
+  no longer unproven: on 2026-09-04 the full pipeline ran on Base Sepolia and
+  0.001 USDC moved on chain, confirmed by reading the transfer log rather than
+  trusting the facilitator. What is untested on mainnet is only that the same
+  code paths work against a chain where the money is real.
+- **Not in the PayAI Bazaar on mainnet**, though the mechanism is now proven
+  rather than assumed. Listing needs a *settled* payment per route — reaching
+  `/verify` does nothing, which is why the catalogue held 0 of 28,095 of our
+  routes. On testnet all 9 appeared within seconds. Announcing the mainnet
+  catalogue costs $0.068, not the ~$1 assumed for months.
 - **No evidence of demand.** `/stats` records the funnel precisely so that
   "nobody has found us" and "agents arrive and refuse to pay" stop looking
   identical. So far the answer is the first one.
