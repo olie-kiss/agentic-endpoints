@@ -19,7 +19,14 @@ import webScraperHandler from "./handlers/web-scraper";
 import pdfParserHandler from "./handlers/pdf-parser";
 import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
-import { alert, readState, scanForPayments } from "./lib/revenue";
+import {
+  alert,
+  alertFailure,
+  readState,
+  recordFailure,
+  scanForPayments,
+  shouldAlertOnFailure,
+} from "./lib/revenue";
 import vaultHandler from "./handlers/vault";
 import { landingPage } from "./pages/landing";
 
@@ -207,6 +214,16 @@ app.get("/revenue", async (c) => {
     last_payment_at: state.lastPaymentAt,
     last_scanned_block: state.lastBlock,
     recent: state.recent,
+
+    // Published so that "no sales" and "the watcher is broken" are never
+    // reported as the same thing.
+    monitor: {
+      healthy: state.consecutiveFailures === 0 && state.lastSuccessAt !== null,
+      last_run_at: state.lastRunAt,
+      last_success_at: state.lastSuccessAt,
+      consecutive_failures: state.consecutiveFailures,
+      last_error: state.lastError,
+    },
     explorer: `https://basescan.org/address/${c.env.X402_PAY_TO}`,
   });
 });
@@ -692,6 +709,18 @@ async function handleScheduled(
     }
   } catch (err) {
     console.error("Revenue scan failed:", err);
+
+    // Persist the failure. A console line alone dies with the invocation, and
+    // a monitor that is silently blind reads exactly like a monitor reporting
+    // no sales.
+    try {
+      const state = await recordFailure(env, err);
+      if (shouldAlertOnFailure(state)) {
+        ctx.waitUntil(alertFailure(env, state));
+      }
+    } catch (nested) {
+      console.error("Could not record revenue scan failure:", nested);
+    }
   }
 }
 

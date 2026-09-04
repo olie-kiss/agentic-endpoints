@@ -42,15 +42,28 @@ export class Vault extends DurableObject<Env> {
       )
     `);
     // Namespaces created before size_bytes existed still have the old shape.
+    //
+    // Only "column already exists" is expected here. Catching everything hid
+    // two different bugs: a genuinely failed migration, and a backfill that
+    // silently never ran, leaving every legacy item recorded as 0 bytes and
+    // therefore free of any quota.
+    let migrated = true;
     try {
       this.ctx.storage.sql.exec(
         `ALTER TABLE items ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0`,
       );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column/i.test(message)) throw err;
+      migrated = false;
+    }
+
+    if (migrated) {
+      // Separate statement, deliberately outside the catch: a failed backfill
+      // must surface rather than be mistaken for an already-applied migration.
       this.ctx.storage.sql.exec(
         `UPDATE items SET size_bytes = LENGTH(ciphertext) WHERE size_bytes = 0`,
       );
-    } catch {
-      // Column already present.
     }
 
     this.ctx.storage.sql.exec(`

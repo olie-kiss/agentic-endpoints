@@ -1,6 +1,13 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { formatUsdc, readState, scanForPayments } from "../src/lib/revenue";
+import {
+  EMPTY_STATE,
+  formatUsdc,
+  readState,
+  recordFailure,
+  scanForPayments,
+  shouldAlertOnFailure,
+} from "../src/lib/revenue";
 
 describe("USDC formatting", () => {
   it("converts base units without float drift", () => {
@@ -55,5 +62,58 @@ describe("GET /revenue", () => {
     expect(body.address).toMatch(/^0x[0-9a-fA-F]{40}$/);
     expect(body.explorer).toContain("basescan.org");
     expect(typeof body.lifetime_usdc).toBe("number");
+  });
+});
+
+describe("monitor health", () => {
+  it("records a failure durably instead of only logging it", async () => {
+    const before = await readState(env);
+    const after = await recordFailure(env, new Error("RPC exploded"));
+
+    expect(after.consecutiveFailures).toBe(before.consecutiveFailures + 1);
+    expect(after.lastError).toBe("RPC exploded");
+    expect(after.lastRunAt).not.toBeNull();
+
+    // Must survive the invocation that hit it.
+    const reread = await readState(env);
+    expect(reread.lastError).toBe("RPC exploded");
+  });
+
+  it("does not advance the watermark on failure, so nothing is skipped", async () => {
+    const before = await readState(env);
+    const after = await recordFailure(env, new Error("boom"));
+    expect(after.lastBlock).toBe(before.lastBlock);
+  });
+
+  it("stays quiet on a blip but escalates a sustained outage", async () => {
+    expect(shouldAlertOnFailure({ ...EMPTY_STATE, consecutiveFailures: 1 })).toBe(false);
+    expect(shouldAlertOnFailure({ ...EMPTY_STATE, consecutiveFailures: 2 })).toBe(false);
+    expect(shouldAlertOnFailure({ ...EMPTY_STATE, consecutiveFailures: 3 })).toBe(true);
+
+    // Re-nags periodically rather than once, but not on every single tick.
+    expect(shouldAlertOnFailure({ ...EMPTY_STATE, consecutiveFailures: 4 })).toBe(false);
+    expect(shouldAlertOnFailure({ ...EMPTY_STATE, consecutiveFailures: 6 })).toBe(true);
+  });
+
+  it("clears the failure streak once a sweep succeeds", async () => {
+    await recordFailure(env, new Error("transient"));
+    expect((await readState(env)).consecutiveFailures).toBeGreaterThan(0);
+
+    const { state } = await scanForPayments(env);
+    expect(state.consecutiveFailures).toBe(0);
+    expect(state.lastError).toBeNull();
+    expect(state.lastSuccessAt).not.toBeNull();
+  });
+
+  it("distinguishes a broken watcher from a quiet one on /revenue", async () => {
+    await recordFailure(env, new Error("RPC down"));
+
+    const res = await SELF.fetch("https://ai.oliverkiss.com/revenue");
+    const body = await res.json();
+
+    // Both cases report zero revenue; only this field tells them apart.
+    expect(body.lifetime_usdc).toBe(0);
+    expect(body.monitor.healthy).toBe(false);
+    expect(body.monitor.last_error).toBe("RPC down");
   });
 });

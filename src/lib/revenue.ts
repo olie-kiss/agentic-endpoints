@@ -46,6 +46,16 @@ export interface MonitorState {
   firstPaymentAt: string | null;
   lastPaymentAt: string | null;
   recent: Payment[];
+
+  /**
+   * Health of the monitor itself. Without this, a scan that has been failing
+   * for a week is indistinguishable from a week with no sales: both report
+   * zero. The whole point of the monitor is to tell those apart.
+   */
+  lastRunAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  consecutiveFailures: number;
 }
 
 export const EMPTY_STATE: MonitorState = {
@@ -55,30 +65,79 @@ export const EMPTY_STATE: MonitorState = {
   firstPaymentAt: null,
   lastPaymentAt: null,
   recent: [],
+  lastRunAt: null,
+  lastSuccessAt: null,
+  lastError: null,
+  consecutiveFailures: 0,
 };
 
 const STATE_KEY = "revenue:state";
 
-function rpcUrl(env: Env): string {
-  return env.BASE_RPC_URL ?? "https://mainnet.base.org";
+/**
+ * How many consecutive failed sweeps before the operator is told. One failed
+ * tick is a blip on a public RPC node; several in a row means the monitor is
+ * blind and nobody would otherwise find out.
+ */
+const FAILURE_ALERT_THRESHOLD = 3;
+
+/**
+ * Base RPC endpoints, tried in order.
+ *
+ * A single public endpoint is not a dependency you can build a monitor on:
+ * mainnet.base.org answers a laptop fine but rate-limits Workers with HTTP
+ * 429, because every Worker in a colo shares egress IPs with everyone else's.
+ * That is not an outage anyone will fix for us, so the monitor carries
+ * alternatives rather than treating one provider's quota as fatal.
+ */
+const RPC_ENDPOINTS = [
+  "https://base-rpc.publicnode.com",
+  "https://base.drpc.org",
+  "https://1rpc.io/base",
+  "https://mainnet.base.org",
+];
+
+function rpcEndpoints(env: Env): string[] {
+  // An explicit override is a deliberate choice (usually a paid, authenticated
+  // node) and must not be silently second-guessed by falling back to a public
+  // one with different rate limits and retention.
+  return env.BASE_RPC_URL ? [env.BASE_RPC_URL] : RPC_ENDPOINTS;
 }
 
-async function rpc<T>(env: Env, method: string, params: unknown[]): Promise<T> {
-  const res = await fetch(rpcUrl(env), {
+async function rpcOnce<T>(
+  url: string,
+  method: string,
+  params: unknown[],
+): Promise<T> {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
 
-  if (!res.ok) {
-    throw new Error(`Base RPC ${method} returned HTTP ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const body = (await res.json()) as { result?: T; error?: { message: string } };
-  if (body.error) throw new Error(`Base RPC ${method}: ${body.error.message}`);
-  if (body.result === undefined) throw new Error(`Base RPC ${method}: empty result`);
+  if (body.error) throw new Error(body.error.message);
+  if (body.result === undefined) throw new Error("empty result");
 
   return body.result;
+}
+
+async function rpc<T>(env: Env, method: string, params: unknown[]): Promise<T> {
+  const endpoints = rpcEndpoints(env);
+  const failures: string[] = [];
+
+  for (const url of endpoints) {
+    try {
+      return await rpcOnce<T>(url, method, params);
+    } catch (err) {
+      // Kept and reported together: "429" alone does not say which providers
+      // were tried, and a monitor you cannot diagnose is barely a monitor.
+      failures.push(`${new URL(url).host}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  throw new Error(`Base RPC ${method} failed on all endpoints — ${failures.join("; ")}`);
 }
 
 /** Left-pads a 20-byte address to the 32-byte width of an indexed log topic. */
@@ -103,6 +162,36 @@ export async function readState(env: Env): Promise<MonitorState> {
   return stored ? { ...EMPTY_STATE, ...stored } : { ...EMPTY_STATE };
 }
 
+async function writeState(env: Env, state: MonitorState): Promise<void> {
+  await env.MONITOR.put(STATE_KEY, JSON.stringify(state));
+}
+
+/**
+ * Records that a sweep failed, so the failure survives the request that hit
+ * it. Deliberately does not advance the watermark: the same blocks are
+ * re-scanned next tick, so nothing is missed.
+ */
+export async function recordFailure(env: Env, err: unknown): Promise<MonitorState> {
+  const state = await readState(env);
+  const next: MonitorState = {
+    ...state,
+    lastRunAt: new Date().toISOString(),
+    lastError: err instanceof Error ? err.message : String(err),
+    consecutiveFailures: state.consecutiveFailures + 1,
+  };
+
+  await writeState(env, next);
+  return next;
+}
+
+/** True when the monitor has failed often enough that it is effectively blind. */
+export function shouldAlertOnFailure(state: MonitorState): boolean {
+  return (
+    state.consecutiveFailures >= FAILURE_ALERT_THRESHOLD &&
+    state.consecutiveFailures % FAILURE_ALERT_THRESHOLD === 0
+  );
+}
+
 /**
  * Scans for USDC transfers into the receiving address since the last scan and
  * folds them into the stored totals.
@@ -119,13 +208,32 @@ export async function scanForPayments(env: Env): Promise<{
   const state = await readState(env);
   const head = Number(await rpc<string>(env, "eth_blockNumber", []));
 
+  const now0 = new Date().toISOString();
+
   if (state.lastBlock === 0) {
-    const initial = { ...state, lastBlock: head };
-    await env.MONITOR.put(STATE_KEY, JSON.stringify(initial));
+    const initial: MonitorState = {
+      ...state,
+      lastBlock: head,
+      lastRunAt: now0,
+      lastSuccessAt: now0,
+      lastError: null,
+      consecutiveFailures: 0,
+    };
+    await writeState(env, initial);
     return { state: initial, newPayments: [] };
   }
 
-  if (head <= state.lastBlock) return { state, newPayments: [] };
+  if (head <= state.lastBlock) {
+    const idle: MonitorState = {
+      ...state,
+      lastRunAt: now0,
+      lastSuccessAt: now0,
+      lastError: null,
+      consecutiveFailures: 0,
+    };
+    await writeState(env, idle);
+    return { state: idle, newPayments: [] };
+  }
 
   const fromBlock = state.lastBlock + 1;
   const toBlock = Math.min(head, state.lastBlock + MAX_BLOCK_RANGE);
@@ -162,9 +270,13 @@ export async function scanForPayments(env: Env): Promise<{
       state.firstPaymentAt ?? (newPayments.length > 0 ? now : null),
     lastPaymentAt: newPayments.length > 0 ? now : state.lastPaymentAt,
     recent: [...newPayments, ...state.recent].slice(0, 20),
+    lastRunAt: now,
+    lastSuccessAt: now,
+    lastError: null,
+    consecutiveFailures: 0,
   };
 
-  await env.MONITOR.put(STATE_KEY, JSON.stringify(next));
+  await writeState(env, next);
 
   return { state: next, newPayments };
 }
@@ -195,13 +307,46 @@ export async function alert(
     `Lifetime: **$${state.totalUsdc.toFixed(6)}** across ${state.paymentCount} payment${state.paymentCount === 1 ? "" : "s"}.`,
   ].join("\n");
 
+  await post(env.ALERT_WEBHOOK_URL, content);
+}
+
+/**
+ * Warns that the monitor itself is broken. Sent through the same webhook,
+ * because an operator who is not told the watcher is blind will read its
+ * silence as "no sales yet".
+ */
+export async function alertFailure(env: Env, state: MonitorState): Promise<void> {
+  if (!env.ALERT_WEBHOOK_URL) return;
+
+  await post(
+    env.ALERT_WEBHOOK_URL,
+    [
+      `⚠️ **Revenue monitor is failing** — ${state.consecutiveFailures} consecutive sweeps.`,
+      `Last error: \`${state.lastError ?? "unknown"}\``,
+      `Last successful sweep: ${state.lastSuccessAt ?? "never"} (block ${state.lastBlock}).`,
+      "Payments are unaffected — this only means arrivals are not being noticed.",
+    ].join("\n"),
+  );
+}
+
+async function post(url: string, content: string): Promise<void> {
   try {
-    await fetch(env.ALERT_WEBHOOK_URL, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content }),
     });
+
+    // fetch resolves on 4xx/5xx, so without this a deleted or revoked webhook
+    // fails completely silently — the exact failure that costs us the alert.
+    if (!res.ok) {
+      console.error(
+        `Alert webhook rejected the notification: HTTP ${res.status} ${await res
+          .text()
+          .catch(() => "")}`.trim(),
+      );
+    }
   } catch (err) {
-    console.error("Revenue alert failed to send:", err);
+    console.error("Alert webhook unreachable:", err);
   }
 }

@@ -29,6 +29,16 @@ routes = [
   { pattern = "ai.oliverkiss.com/*", zone_name = "oliverkiss.com" }
 ]
 
+# ── Observability ──────────────────────────────────────────────────
+# Without this, console.error is written to a live `wrangler tail` and
+# nowhere else: a cron that fails at 3am leaves no trace by morning. Sampling
+# stays at 1.0 because this Worker's traffic is far below any volume where
+# dropping logs would save meaningful money, and the rare failure is exactly
+# the request we cannot afford to have sampled away.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [vars]
 ENVIRONMENT = "development"
 
