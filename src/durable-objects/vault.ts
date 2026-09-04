@@ -352,10 +352,14 @@ export class Vault extends DurableObject<Env> {
       .toArray();
 
     if (rows.length === 0) {
-      return Response.json(
-        { status: "not_found", key: body.key },
-        { status: 404 },
-      );
+      // Deliberately 200, not 404. This is a $0.02 route and the caller was
+      // authenticated: "no such key" is the authoritative answer they paid
+      // for, and answering it is the work. Under x402 any status >= 400
+      // cancels settlement, so a 404 here hands out that answer for free and
+      // leaves the payment header replayable — and it would let an owner
+      // probe key existence by replaying a retrieve instead of paying for
+      // /vault/exists, which already returns 200 for exactly this reason.
+      return Response.json({ status: "not_found", key: body.key });
     }
 
     const row = rows[0];
@@ -394,10 +398,10 @@ export class Vault extends DurableObject<Env> {
       .toArray();
 
     if (existing.length === 0) {
-      return Response.json(
-        { status: "not_found", key: body.key },
-        { status: 404 },
-      );
+      // Deleting something already absent is a successful idempotent
+      // outcome, not a failure — and as above, a 4xx would make the paid
+      // request settle-free and replayable.
+      return Response.json({ status: "not_found", key: body.key });
     }
 
     this.ctx.storage.sql.exec(`DELETE FROM items WHERE key = ?`, body.key);

@@ -132,3 +132,63 @@ describe("Vault quotas and metadata", () => {
     }
   });
 });
+
+/**
+ * These are paid routes. Under x402 any status >= 400 cancels settlement, so
+ * a 4xx returned after the service has already done the work gives the answer
+ * away for free and leaves the payment header replayable.
+ */
+describe("vault paid-route settlement contract", () => {
+  it("answers a missing key with 200 and a status, not 404", async () => {
+    const n = ns();
+    const token = await claimed(n);
+
+    const res = await vault(n, "/retrieve", {
+      key: "no-such-key",
+      namespace_token: token,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.json.status).toBe("not_found");
+  });
+
+  it("treats deleting an absent key as a successful idempotent outcome", async () => {
+    const n = ns();
+    const token = await claimed(n);
+
+    const res = await vault(n, "/delete", {
+      key: "no-such-key",
+      namespace_token: token,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.json.status).toBe("not_found");
+  });
+
+  it("keeps a paid retrieve from undercutting the cheaper exists probe", async () => {
+    const n = ns();
+    const token = await claimed(n);
+
+    // Both must cost the caller a settled payment to learn the same fact.
+    const retrieve = await vault(n, "/retrieve", {
+      key: "absent",
+      namespace_token: token,
+    });
+    const exists = await vault(n, "/exists", {
+      key: "absent",
+      namespace_token: token,
+    });
+
+    expect(retrieve.status).toBe(200);
+    expect(exists.status).toBe(200);
+  });
+
+  it("still refuses unauthenticated callers with a real 4xx", async () => {
+    const n = ns();
+    await claimed(n);
+
+    // No work was done here, so cancelling settlement is correct.
+    const res = await vault(n, "/retrieve", { key: "seed" });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+});

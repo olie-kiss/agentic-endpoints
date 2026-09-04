@@ -6,10 +6,14 @@ import { signReceipt, errorResponse } from "../lib/utils";
 const app = new Hono<{ Bindings: Env }>();
 
 /**
- * POST /vault/store (FREE — no x402 payment required)
+ * POST /vault/store — $0.02
  *
- * Store an encrypted item. Client-side encryption is expected —
- * the ciphertext is stored as-is, the server never sees plaintext.
+ * Store an encrypted item. Client-side encryption is expected — the
+ * ciphertext is stored as-is and the server holds no key that could decrypt
+ * it. Note the limits of that claim: the item key, the namespace, the `alg`
+ * label and the size are all stored in the clear, so the service can see
+ * which named secrets exist and how big they are. `alg` is advisory, and
+ * nothing here can verify that what was sent was in fact encrypted.
  *
  * Body: { namespace, key, ciphertext, alg?, ttl? }
  */
@@ -105,7 +109,7 @@ app.post("/retrieve", async (c) => {
 });
 
 /**
- * POST /vault/delete (FREE)
+ * POST /vault/delete — $0.005
  *
  * Delete an encrypted item by namespace + key.
  *
@@ -146,7 +150,7 @@ app.post("/delete", async (c) => {
 });
 
 /**
- * POST /vault/exists (FREE)
+ * POST /vault/exists — $0.001
  *
  * Check if an encrypted item exists without retrieving it.
  *

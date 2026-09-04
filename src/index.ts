@@ -1013,10 +1013,18 @@ async function spendCredits(
     throw err;
   }
 
-  // A 5xx is our failure, so the customer keeps their credit. A 4xx is theirs
-  // and stays billed: validation still consumed the request, and refunding it
-  // would make malformed input a free way to probe the service.
-  if (response.status >= 500) {
+  // Any status >= 400 means the request was refused rather than served, so
+  // the customer keeps their credit.
+  //
+  // This used to bill 4xx, reasoning that refunding it would make malformed
+  // input a free way to probe the service. That protection was never real:
+  // an x402 caller already gets every 4xx for nothing, because the middleware
+  // cancels settlement above 399. All the rule actually did was charge
+  // prepaid customers — the ones who committed money up front — for errors
+  // that per-call customers get free. The same request now costs the same
+  // whichever way it was paid for, and abusive volume is a rate-limiting
+  // problem, which is handled before any of this.
+  if (response.status >= 400) {
     ctx.waitUntil(account.refund(tokenHash, priceMicros));
     return response;
   }

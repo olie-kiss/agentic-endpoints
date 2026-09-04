@@ -167,6 +167,31 @@ describe("paying with credits over HTTP", () => {
     expect(res.headers.get("X-Credit-Balance")).toBe("0.995000");
   });
 
+  it("does not bill a credit customer for a request it refused", async () => {
+    await fund("ae_refund", 1_000_000);
+
+    // Malformed body: /compress needs `text`. Nothing is served here.
+    const res = await SELF.fetch("https://ai.oliverkiss.com/compress", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Credit-Token": "ae_refund",
+      },
+      body: JSON.stringify({ not_text: 1 }),
+    });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+
+    // An x402 caller gets this same 4xx for nothing, because settlement is
+    // cancelled above 399. Billing it here would charge the customer who
+    // committed money up front for an error the per-call customer gets free.
+    const { tokenHash, stub } = await account("ae_refund");
+    const ledger = await runInDurableObject(stub, (i: Credits) =>
+      i.balance(tokenHash),
+    );
+    expect(ledger?.balance_usd).toBe("1.000000");
+  });
+
   it("leaves per-call x402 completely untouched", async () => {
     // No credit header: the existing payment gate must behave exactly as before.
     const res = await SELF.fetch("https://ai.oliverkiss.com/compress", {
