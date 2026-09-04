@@ -122,3 +122,86 @@ namespace_id = "1003"
   [ratelimits.simple]
   limit = 600
   period = 60
+
+# ── Testnet Environment ────────────────────────────────────────────
+# A throwaway deployment on Base Sepolia, used to prove settlement end to
+# end without spending real USDC.
+#
+# It exists as a deployed Worker rather than `wrangler dev` because neither
+# dev mode can run this service: local mode cannot make outbound TLS
+# connections on some networks, and remote mode cannot run SQLite-backed
+# Durable Objects at all.
+#
+# Separate KV, Durable Objects and rate-limit namespaces, so nothing here
+# can touch production state. No custom route and no cron: it is reachable
+# only on workers.dev, and the revenue monitor watches mainnet, which this
+# deployment has nothing to say about.
+[env.testnet]
+name = "agentic-endpoints-testnet"
+workers_dev = true
+# Explicitly empty: top-level `routes` is inherited by every environment, so
+# without this the testnet Worker tries to claim ai.oliverkiss.com.
+routes = []
+
+# Also inherited, and it matters: the revenue monitor writes its watermark
+# to the MONITOR namespace shared with production. A second Worker sweeping
+# mainnet on the same schedule would move production's watermark.
+[env.testnet.triggers]
+crons = []
+
+[env.testnet.vars]
+ENVIRONMENT = "testnet"
+X402_NETWORK = "eip155:84532"
+FACILITATOR_URL = "https://x402.org/facilitator"
+
+[env.testnet.observability]
+enabled = true
+head_sampling_rate = 1
+
+[[env.testnet.kv_namespaces]]
+binding = "MONITOR"
+id = "18c22de5e5b846d4813431dcc92035e1"
+
+[[env.testnet.durable_objects.bindings]]
+name = "ONCE_KEY"
+class_name = "OnceKey"
+
+[[env.testnet.durable_objects.bindings]]
+name = "VAULT"
+class_name = "Vault"
+
+[[env.testnet.durable_objects.bindings]]
+name = "CREDITS"
+class_name = "Credits"
+
+[[env.testnet.durable_objects.bindings]]
+name = "STATS"
+class_name = "Stats"
+
+[[env.testnet.migrations]]
+tag = "v1"
+new_sqlite_classes = ["OnceKey", "Vault", "Credits", "Stats"]
+
+[[env.testnet.ratelimits]]
+name = "FREE_RATE_LIMITER"
+namespace_id = "2001"
+
+  [env.testnet.ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[env.testnet.ratelimits]]
+name = "WRITE_RATE_LIMITER"
+namespace_id = "2002"
+
+  [env.testnet.ratelimits.simple]
+  limit = 20
+  period = 60
+
+[[env.testnet.ratelimits]]
+name = "PAID_RATE_LIMITER"
+namespace_id = "2003"
+
+  [env.testnet.ratelimits.simple]
+  limit = 600
+  period = 60

@@ -310,9 +310,25 @@ let gatedApp: Hono<{ Bindings: Env }> | null = null;
  * risk -- it shipped three vault routes for free, and later advertised them
  * as free after they had been priced.
  */
-const BASE = "eip155:8453"; // Base mainnet
+const BASE_MAINNET = "eip155:8453" as const;
+const BASE_SEPOLIA = "eip155:84532" as const;
+
+/**
+ * Which chain the payment gate demands and the facilitator settles on.
+ *
+ * Configurable for exactly one reason: settlement is the only part of this
+ * pipeline that has never been proven, and proving it on mainnet costs real
+ * money. Base Sepolia costs nothing and the Circle faucet needs no account,
+ * which matters here. Mainnet stays the default, so an unset or misspelled
+ * var can only fail towards charging real USDC, never towards accepting
+ * worthless testnet tokens for real work.
+ */
+export function networkFor(env: Env): typeof BASE_MAINNET | typeof BASE_SEPOLIA {
+  return env.X402_NETWORK === BASE_SEPOLIA ? BASE_SEPOLIA : BASE_MAINNET;
+}
 
 function buildRoutes(env: Env): RoutesConfig {
+  const BASE = networkFor(env);
   return {
     "/once-key": {
       accepts: {
@@ -943,7 +959,7 @@ async function handleRequest(
         );
       }
       const resourceServer = new x402ResourceServer(facilitatorClient)
-        .register(BASE, new ExactEvmScheme())
+        .register(networkFor(env), new ExactEvmScheme())
         .registerExtension(bazaarResourceServerExtension);
 
       const httpServer = new x402HTTPResourceServer(resourceServer, routes);

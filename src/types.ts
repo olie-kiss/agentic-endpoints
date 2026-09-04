@@ -19,6 +19,13 @@ export interface Env {
 
   // Optional: override facilitator URL (defaults to https://facilitator.payai.network)
   FACILITATOR_URL?: string;
+
+  /**
+   * Chain to price and settle on. Only "eip155:84532" (Base Sepolia) is
+   * honoured; anything else, including unset, means Base mainnet. Exists so
+   * settlement can be proven end to end without spending real USDC.
+   */
+  X402_NETWORK?: string;
   // Optional: only needed if you switch to the CDP Facilitator for Bazaar indexing
   CDP_API_KEY_ID?: string;
   CDP_API_KEY_SECRET?: string;

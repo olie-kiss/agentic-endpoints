@@ -6,3 +6,6 @@ dist/
 
 # Signing keys (MCP Registry DNS auth)
 *.pem
+
+# Throwaway Base Sepolia key used only to prove settlement. Never commit.
+.testnet-wallet
