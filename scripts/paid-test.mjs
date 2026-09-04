@@ -18,14 +18,29 @@
  *   set -a && . ./.dev.vars && set +a && node scripts/paid-test.mjs
  */
 import { createPublicClient, http as viemHttp, formatUnits } from "viem";
-import { base } from "viem/chains";
+import { base, baseSepolia } from "viem/chains";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
 import { ExactEvmScheme } from "@x402/evm/exact/client";
 import { toClientEvmSigner } from "@x402/evm";
 
-const BASE = "eip155:8453";
-const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+/**
+ * Which chain to sign for.
+ *
+ * Selected by --testnet rather than read from the challenge, because the
+ * balance check happens before the challenge is fetched — and a check run
+ * against the wrong chain reports an empty wallet for a funded one.
+ */
+const TESTNET = process.argv.includes("--testnet");
+
+const BASE = TESTNET ? "eip155:84532" : "eip155:8453";
+const USDC = TESTNET
+  ? "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+  : "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const VIEM_CHAIN = TESTNET ? baseSepolia : base;
+const EXPLORER = TESTNET
+  ? "https://sepolia.basescan.org"
+  : "https://basescan.org";
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 const flags = new Set(process.argv.slice(2).filter((a) => a.startsWith("--")));
@@ -72,7 +87,7 @@ if (!key) {
 // touches disk and never holds anything, so there is nothing to protect.
 const privateKey = key ?? generatePrivateKey();
 const account = privateKeyToAccount(privateKey);
-const chain = createPublicClient({ chain: base, transport: viemHttp() });
+const chain = createPublicClient({ chain: VIEM_CHAIN, transport: viemHttp() });
 
 // Check funds before signing anything, so a dry wallet gives a clear message
 // instead of an opaque verification failure.
@@ -100,7 +115,10 @@ console.log(`ETH:     ${formatUnits(gas, 18)} (not needed — the facilitator pa
 console.log(`Target:  ${baseUrl}${path}\n`);
 
 if (balance === 0n && !allowUnfunded) {
-  console.error("This wallet holds no USDC on Base. Fund it and re-run.");
+  console.error(
+    `This wallet holds no USDC on ${TESTNET ? "Base Sepolia" : "Base"}. ` +
+      "Fund it and re-run.",
+  );
   process.exit(1);
 }
 
@@ -170,7 +188,7 @@ if (settleHeader) {
   const settle = JSON.parse(Buffer.from(settleHeader, "base64").toString());
   console.log("\nSettlement:", JSON.stringify(settle, null, 2).slice(0, 600));
   if (settle.transaction) {
-    console.log(`\nOn-chain: https://basescan.org/tx/${settle.transaction}`);
+    console.log(`\nOn-chain: ${EXPLORER}/tx/${settle.transaction}`);
   }
 }
 
