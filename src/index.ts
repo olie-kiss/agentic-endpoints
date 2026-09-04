@@ -1117,6 +1117,16 @@ async function handleScheduled(
   // reported outage of this service.
   ctx.waitUntil(statsStub(env).heartbeat());
 
+  // The testnet deployment shares production's MONITOR namespace, so a scan
+  // from there would advance the real revenue watermark past blocks nobody
+  // had examined, and any payment in the gap would go unrecorded for good.
+  // Its cron is already empty; this is the guard for the day someone
+  // redeploys without noticing that triggers are inherited per environment.
+  if (env.ENVIRONMENT === "testnet") {
+    console.log("Skipping revenue scan: testnet shares production KV.");
+    return;
+  }
+
   try {
     const { state, newPayments } = await scanForPayments(env);
 
