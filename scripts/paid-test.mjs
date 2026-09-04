@@ -19,7 +19,7 @@
  */
 import { createPublicClient, http as viemHttp, formatUnits } from "viem";
 import { base } from "viem/chains";
-import { privateKeyToAccount } from "viem/accounts";
+import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
 import { ExactEvmScheme } from "@x402/evm/exact/client";
 import { toClientEvmSigner } from "@x402/evm";
@@ -27,8 +27,25 @@ import { toClientEvmSigner } from "@x402/evm";
 const BASE = "eip155:8453";
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
-const path = process.argv[2] ?? "/compress";
-const baseUrl = process.argv[3] ?? "https://ai.oliverkiss.com";
+const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+const flags = new Set(process.argv.slice(2).filter((a) => a.startsWith("--")));
+
+/**
+ * Sign and submit from an empty wallet on purpose.
+ *
+ * Settlement needs real USDC, but everything in front of it does not: the
+ * challenge, the scheme and network match, the EIP-3009 signature, the
+ * facilitator round trip and its verdict are all exercised by a payment that
+ * is perfectly valid apart from being unbacked. A rejection that names the
+ * balance is therefore a passing result — it proves the only thing left
+ * untested is the broadcast itself. A 500, a timeout, or a complaint about
+ * the signature or the network is a real bug, and one that would otherwise
+ * have been found by the first paying customer.
+ */
+const allowUnfunded = flags.has("--allow-unfunded");
+
+const path = args[0] ?? "/compress";
+const baseUrl = args[1] ?? "https://ai.oliverkiss.com";
 
 const BODIES = {
   "/compress": {
@@ -41,14 +58,20 @@ const BODIES = {
 
 const key = process.env.X402_TEST_PRIVATE_KEY;
 if (!key) {
-  console.error(
-    "X402_TEST_PRIVATE_KEY is not set.\n" +
-      "Use a throwaway wallet holding only a dollar or two.",
-  );
-  process.exit(1);
+  if (!allowUnfunded) {
+    console.error(
+      "X402_TEST_PRIVATE_KEY is not set.\n" +
+        "Use a throwaway wallet holding only a dollar or two,\n" +
+        "or pass --allow-unfunded to test the pipeline with a generated key.",
+    );
+    process.exit(1);
+  }
 }
 
-const account = privateKeyToAccount(key);
+// With --allow-unfunded and no key supplied, mint a random one. It never
+// touches disk and never holds anything, so there is nothing to protect.
+const privateKey = key ?? generatePrivateKey();
+const account = privateKeyToAccount(privateKey);
 const chain = createPublicClient({ chain: base, transport: viemHttp() });
 
 // Check funds before signing anything, so a dry wallet gives a clear message
@@ -76,9 +99,16 @@ console.log(`USDC:    $${formatUnits(balance, 6)}`);
 console.log(`ETH:     ${formatUnits(gas, 18)} (not needed — the facilitator pays gas)`);
 console.log(`Target:  ${baseUrl}${path}\n`);
 
-if (balance === 0n) {
+if (balance === 0n && !allowUnfunded) {
   console.error("This wallet holds no USDC on Base. Fund it and re-run.");
   process.exit(1);
+}
+
+if (balance === 0n) {
+  console.log(
+    "Running unfunded: expecting the facilitator to reject this payment for\n" +
+      "insufficient funds, and nothing else.\n",
+  );
 }
 
 const client = new x402Client().register(
@@ -118,6 +148,23 @@ const body = await paid.clone().json().catch(() => ({}));
 console.log(`Response: ${paid.status}`);
 console.log(JSON.stringify(body, null, 2).slice(0, 800));
 
+/**
+ * Under x402 v2 the reason for a refusal travels in the `payment-required`
+ * header, not the body — the body of a 402 is legitimately empty. Reading the
+ * body alone reported "unknown failure" for a perfectly well-explained
+ * rejection, which is how a working system gets mistaken for a broken one.
+ */
+const challengeHeader = paid.headers.get("payment-required");
+let refusal;
+if (challengeHeader) {
+  try {
+    refusal = JSON.parse(Buffer.from(challengeHeader, "base64").toString());
+    if (refusal.error) console.log(`\nFacilitator verdict: ${refusal.error}`);
+  } catch {
+    console.log("\nCould not decode the payment-required header.");
+  }
+}
+
 const settleHeader = paid.headers.get("payment-response");
 if (settleHeader) {
   const settle = JSON.parse(Buffer.from(settleHeader, "base64").toString());
@@ -129,6 +176,27 @@ if (settleHeader) {
 
 if (paid.status === 200 && settleHeader) {
   console.log("\n✅ Paid call settled. Check the receiving wallet.");
+} else if (balance === 0n) {
+  // An unfunded run has exactly one acceptable failure. Anything else means
+  // the payment path is broken for funded buyers too.
+  const verdict = refusal?.error ?? "";
+
+  if (paid.status === 402 && verdict.includes("insufficient_balance")) {
+    console.log(
+      "\n✅ Pipeline verified end to end, short of the broadcast.\n" +
+        "   The challenge, the EIP-3009 signature, the scheme and network\n" +
+        "   match and the facilitator round trip all work. It refused only\n" +
+        "   because the wallet is empty, which is the correct answer.",
+    );
+  } else {
+    console.log(
+      `\n❌ Unexpected rejection (${paid.status}, ${verdict || "no verdict"}).\n` +
+        "   An empty wallet should be refused for insufficient balance.\n" +
+        "   Being refused for any other reason means a funded buyer would\n" +
+        "   likely be refused too.",
+    );
+    process.exit(1);
+  }
 } else {
   console.log("\n⚠️  Not settled. The x402 middleware cancels settlement on any status >= 400.");
 }
