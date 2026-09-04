@@ -92,6 +92,11 @@ npm run typecheck
 # Re-announce every route to the PayAI Bazaar. Signs a payment attempt with a
 # throwaway, never-funded key: verification fails on balance, nothing is spent.
 node scripts/trigger-indexing.mjs
+
+# Make one real paid call. Requires a THROWAWAY wallet holding a little USDC
+# on Base; the key is read from the environment and never written anywhere.
+export X402_TEST_PRIVATE_KEY=0x...
+node scripts/paid-test.mjs /compress
 ```
 
 ## API Examples
