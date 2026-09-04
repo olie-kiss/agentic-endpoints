@@ -1,4 +1,61 @@
-export function landingPage(): string {
+import { describeRoutes, FREE_POST_ENDPOINTS } from "../lib/discovery";
+import type { RoutesConfig } from "@x402/core/server";
+
+/** Free endpoints that carry no request body, so they are not in either
+ * generated list but are the first thing a human or crawler tries. */
+const FREE_GET_ENDPOINTS = [
+  ["/status", "Uptime, error rate and latency, measured from real traffic"],
+  ["/stats", "Demand funnel: requests challenged, paid and served free"],
+  ["/revenue", "USDC received, read directly from Base — not from our logs"],
+  ["/health", "Health check"],
+  ["/openapi.json", "OpenAPI 3.1 description of every route"],
+  ["/llms.txt", "Plain-language description for a model given only this URL"],
+];
+
+const escapeHtml = (raw: string): string =>
+  raw.replace(/[&<>"]/g, (ch) =>
+    ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : ch === ">" ? "&gt;" : "&quot;",
+  );
+
+/**
+ * One row of the endpoint table.
+ *
+ * Descriptions come from the same route config that sets the price, so the
+ * page cannot advertise a route that no longer exists or a price we do not
+ * actually charge. Everything interpolated here is authored in this repo,
+ * but it is escaped anyway: the day a description carries a user-supplied
+ * string is not the day anyone will remember this template.
+ */
+function endpointRow(
+  method: string,
+  path: string,
+  desc: string,
+  price: string,
+): string {
+  const free = price === "Free";
+  return `      <div class="endpoint">
+        <div class="endpoint-left">
+          <div><span class="endpoint-method">${escapeHtml(method)}</span><span class="endpoint-path">${escapeHtml(path)}</span></div>
+          <div class="endpoint-desc">${escapeHtml(desc)}</div>
+        </div>
+        <span class="endpoint-price ${free ? "free" : "paid"}">${escapeHtml(price)}</span>
+      </div>`;
+}
+
+export function landingPage(routes: RoutesConfig): string {
+  const paidRows = describeRoutes(routes)
+    .map((r) => endpointRow(r.method, r.path, r.description, r.price))
+    .join("\n\n");
+
+  const freeRows = [
+    ...FREE_POST_ENDPOINTS.map((f) =>
+      endpointRow("POST", f.path, f.summary, "Free"),
+    ),
+    ...FREE_GET_ENDPOINTS.map(([path, desc]) =>
+      endpointRow("GET", path, desc, "Free"),
+    ),
+  ].join("\n\n");
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -103,6 +160,13 @@ export function landingPage(): string {
       letter-spacing: 0.08em;
       color: var(--muted);
       margin-bottom: 0.75rem;
+    }
+    .section-note {
+      font-size: 0.8rem;
+      line-height: 1.6;
+      color: var(--muted);
+      margin: -0.25rem 0 0.85rem;
+      max-width: 60ch;
     }
     .endpoint {
       background: var(--surface);
@@ -218,79 +282,16 @@ export function landingPage(): string {
     </div>
 
     <div class="endpoints">
-      <h2>Endpoints</h2>
+      <h2>Paid Endpoints</h2>
+${paidRows}
+    </div>
 
-      <div class="endpoint">
-        <div class="endpoint-left">
-          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/once-key</span></div>
-          <div class="endpoint-desc">Atomic idempotency witness — claim a key exactly once</div>
-        </div>
-        <span class="endpoint-price paid">$0.001</span>
-      </div>
+    <div class="endpoints">
+      <h2>Free Endpoints</h2>
+      <p class="section-note">Lifecycle calls are free because the paid claim already covers them, and telemetry is free because a service asking to be trusted should not charge you to check whether it works.</p>
+${freeRows}
 
-      <div class="endpoint">
-        <div class="endpoint-left">
-          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/scrape</span></div>
-          <div class="endpoint-desc">Pay-per-query web scraping and text extraction</div>
-        </div>
-        <span class="endpoint-price paid">$0.005</span>
-      </div>
-
-      <div class="endpoint">
-        <div class="endpoint-left">
-          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/pdf-parse</span></div>
-          <div class="endpoint-desc">PDF text extraction from URL</div>
-        </div>
-        <span class="endpoint-price paid">$0.01</span>
-      </div>
-
-      <div class="endpoint">
-        <div class="endpoint-left">
-          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/compress</span></div>
-          <div class="endpoint-desc">Token compression / context reduction for LLMs</div>
-        </div>
-        <span class="endpoint-price paid">$0.005</span>
-      </div>
-
-      <div class="endpoint">
-        <div class="endpoint-left">
-          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/store</span></div>
-          <div class="endpoint-desc">Store an encrypted item (client-side encryption). First write claims the namespace and returns a one-time namespace_token</div>
-        </div>
-        <span class="endpoint-price paid">$0.02</span>
-      </div>
-
-      <div class="endpoint">
-        <div class="endpoint-left">
-          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/retrieve</span></div>
-          <div class="endpoint-desc">Retrieve an encrypted item from the vault (requires namespace_token)</div>
-        </div>
-        <span class="endpoint-price paid">$0.02</span>
-      </div>
-
-      <div class="endpoint">
-        <div class="endpoint-left">
-          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/delete</span></div>
-          <div class="endpoint-desc">Delete an encrypted item (requires namespace_token)</div>
-        </div>
-        <span class="endpoint-price paid">$0.005</span>
-      </div>
-
-      <div class="endpoint">
-        <div class="endpoint-left">
-          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/vault/exists</span></div>
-          <div class="endpoint-desc">Check if an encrypted item exists (requires namespace_token)</div>
-        </div>
-        <span class="endpoint-price paid">$0.001</span>
-      </div>
-
-      <div class="endpoint">
-        <div class="endpoint-left">
-          <div><span class="endpoint-method">POST</span><span class="endpoint-path">/mcp</span></div>
-          <div class="endpoint-desc">Remote MCP server (Streamable HTTP). Listing tools is free; calling one costs that tool's price</div>
-        </div>
-        <span class="endpoint-price free">FREE TO LIST</span>
-      </div>
+${endpointRow("POST", "/mcp", "Remote MCP server (Streamable HTTP). Listing tools is free; calling one costs that tool's price", "Free")}
     </div>
 
     <div class="code-section">
@@ -308,18 +309,47 @@ export function landingPage(): string {
 
     <div class="code-section">
       <h2>Quick Start</h2>
-      <div class="code-block"><span class="cmt">// Discover endpoints</span>
-<span class="kw">const</span> res = <span class="kw">await</span> <span class="fn">fetch</span>(<span class="str">"https://ai.oliverkiss.com/"</span>, {
-  headers: { Accept: <span class="str">"application/json"</span> }
-});
+      <div class="code-block"><span class="cmt">// npm install agentic-endpoints</span>
+<span class="kw">import</span> { AgenticEndpoints } <span class="kw">from</span> <span class="str">"agentic-endpoints"</span>;
 
-<span class="cmt">// x402-enabled agent call (payment handled by agent wallet)</span>
+<span class="cmt">// Run a side effect exactly once, even if your agent is running twice.</span>
+<span class="cmt">// Claims the key, records the result, releases it if the work throws.</span>
+<span class="kw">const</span> { outcome, result } = <span class="kw">await</span> client.<span class="fn">exactlyOnce</span>(
+  { namespace: <span class="str">"billing"</span>, actionKey: <span class="str">\`charge:\${order.id}\`</span>, leaseTtl: <span class="str">300</span> },
+  <span class="kw">async</span> () =&gt; stripe.charges.<span class="fn">create</span>({ amount: order.total }),
+);
+
+<span class="cmt">// outcome: "executed" — you did the work</span>
+<span class="cmt">// outcome: "duplicate" — someone else already did it; result is theirs</span></div>
+    </div>
+
+    <div class="code-section">
+      <h2>Or over plain HTTP</h2>
+      <div class="code-block"><span class="cmt">// 1. Claim it. Costs $0.001. Any x402-enabled wallet can pay.</span>
 <span class="kw">const</span> claim = <span class="kw">await</span> <span class="fn">fetch</span>(<span class="str">"https://ai.oliverkiss.com/once-key"</span>, {
   method: <span class="str">"POST"</span>,
   headers: { <span class="str">"Content-Type"</span>: <span class="str">"application/json"</span> },
   body: <span class="fn">JSON.stringify</span>({
-    namespace: <span class="str">"my-app"</span>,
-    action_key: <span class="str">"order-12345"</span>
+    namespace: <span class="str">"billing"</span>,
+    action_key: <span class="str">"charge:order-12345"</span>,
+    lease_ttl: <span class="str">300</span>
+  })
+}).<span class="fn">then</span>(r =&gt; r.<span class="fn">json</span>());
+
+<span class="cmt">// "claimed"     → you won the race, do the work</span>
+<span class="cmt">// "duplicate"   → already done; claim.result holds the outcome</span>
+<span class="cmt">// "in_progress" → someone else holds a live lease, wait and retry</span>
+<span class="cmt">// "conflict"    → same key, different payload. Never retry this.</span>
+
+<span class="cmt">// 2. Record what happened. Free — the claim paid for this.</span>
+<span class="kw">await</span> <span class="fn">fetch</span>(<span class="str">"https://ai.oliverkiss.com/once-key/complete"</span>, {
+  method: <span class="str">"POST"</span>,
+  headers: { <span class="str">"Content-Type"</span>: <span class="str">"application/json"</span> },
+  body: <span class="fn">JSON.stringify</span>({
+    namespace: <span class="str">"billing"</span>,
+    action_key: <span class="str">"charge:order-12345"</span>,
+    namespace_token: claim.namespace_token,
+    result: { charge_id: <span class="str">"ch_abc123"</span> }
   })
 });</div>
     </div>

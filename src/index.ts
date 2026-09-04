@@ -155,7 +155,7 @@ app.get("/", (c) => {
   }
 
   // Serve HTML landing page for browsers
-  return c.html(landingPage());
+  return c.html(landingPage(buildRoutes(c.env)));
 });
 
 // ── Health check (free) ───────────────────────────────────────────

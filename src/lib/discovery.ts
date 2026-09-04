@@ -147,6 +147,23 @@ export const FREE_POST_ENDPOINTS = [
       required: ["namespace", "action_key"],
     },
   },
+  {
+    path: "/credits/balance",
+    summary: "Check a prepaid credit balance",
+    description:
+      "Returns the remaining balance for a credit token, and what it has " +
+      "been spent on. Free, and takes no request body: the token goes in " +
+      "the X-Credit-Token header. Charging a buyer to find out how much " +
+      "they have left would be a good way to never sell them a second one.",
+    headers: [
+      {
+        name: "X-Credit-Token",
+        description: "The token issued by /credits/buy. Required.",
+      },
+    ],
+    example: undefined,
+    schema: undefined,
+  },
 ] as const;
 
 export function buildOpenApi(routes: RoutesConfig, origin: string) {
@@ -205,19 +222,40 @@ export function buildOpenApi(routes: RoutesConfig, origin: string) {
         operationId: free.path
           .replace(/[^a-zA-Z0-9]+/g, "_")
           .replace(/^_|_$/g, ""),
-        requestBody: {
-          required: true,
-          content: {
-            "application/json": {
-              schema: free.schema,
-              example: free.example,
-            },
-          },
-        },
+        ...(free.schema
+          ? {
+              requestBody: {
+                required: true,
+                content: {
+                  "application/json": {
+                    schema: free.schema,
+                    example: free.example,
+                  },
+                },
+              },
+            }
+          : {}),
+        ...((free as { headers?: readonly { name: string; description: string }[] })
+          .headers
+          ? {
+              parameters: (
+                free as {
+                  headers: readonly { name: string; description: string }[];
+                }
+              ).headers.map((h) => ({
+                name: h.name,
+                in: "header",
+                required: true,
+                description: h.description,
+                schema: { type: "string" },
+              })),
+            }
+          : {}),
         responses: {
           "200": { description: "Success" },
-          "403": { description: "Missing or invalid namespace_token." },
-          "404": { description: "No live claim for this action_key." },
+          "400": { description: "Malformed request." },
+          "403": { description: "Missing or invalid credential." },
+          "404": { description: "No such record." },
           "429": { description: "Rate limited." },
         },
       },
@@ -329,7 +367,6 @@ export function buildLlmsTxt(routes: RoutesConfig, origin: string): string {
   for (const free of FREE_POST_ENDPOINTS) {
     lines.push(`- \`POST ${origin}${free.path}\` — ${free.summary}`);
   }
-  lines.push(`- \`POST ${origin}/credits/balance\` — check a credit balance`);
   lines.push(`- \`${origin}/mcp\` — Model Context Protocol server (JSON-RPC)`);
   lines.push("");
 
