@@ -16,6 +16,7 @@ Live at **https://ai.oliverkiss.com**
 | `/vault/retrieve` | POST | $0.02 | Retrieve a client-encrypted item |
 | `/vault/delete` | POST | $0.005 | Delete an item |
 | `/vault/exists` | POST | $0.001 | Check whether an item exists |
+| `/revenue` | GET | Free | On-chain USDC received, read from Base |
 | `/mcp` | POST | Free to list | Remote MCP server; each tool costs its route's price |
 | `/` | GET | Free | Service discovery (JSON) or landing page (HTML) |
 | `/health` | GET | Free | Health check |
@@ -58,6 +59,30 @@ re-enters the corresponding paid route in-process, so it passes the same x402
 gate, body cap and validation as a direct HTTP call. Without a valid
 `X-PAYMENT` header the tool returns `isError: true` and a machine-readable
 payment demand (price, `payTo`, asset, network) rather than performing work.
+
+## Revenue Monitoring
+
+The service could demand payment for months with no way to tell whether a
+payment ever arrived — including the failure mode where payments verify but
+never settle. A cron trigger sweeps Base every 5 minutes for USDC `Transfer`
+logs into the receiving address and folds them into a running ledger in KV.
+
+Revenue is read from the chain, not from our own logs or the facilitator's
+word, so it cannot be inflated by a bug on either side. `GET /revenue` publishes
+the ledger for free — it costs nothing and gives a prospective caller evidence
+the service actually transacts.
+
+Set `ALERT_WEBHOOK_URL` to a Discord webhook to be notified when money lands:
+
+```bash
+npx wrangler secret put ALERT_WEBHOOK_URL
+```
+
+The first scan starts the watermark at the current chain head rather than
+genesis; scanning millions of blocks through a public RPC node would fail
+repeatedly and never establish a watermark at all. The watermark advances only
+on a successful scan, so a transient RPC failure is retried on the next tick
+with nothing missed.
 
 ## Stack
 

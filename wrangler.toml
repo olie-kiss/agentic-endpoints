@@ -14,6 +14,10 @@ compatibility_flags = ["nodejs_compat"]
 #                        an absent secret would sign with a known key.
 #
 # Optional:
+#   ALERT_WEBHOOK_URL  - Discord-compatible webhook, posted to when USDC lands
+#                        on the receiving address. Unset = monitoring still
+#                        records revenue, it just cannot tell you about it.
+#   BASE_RPC_URL       - Override the Base RPC used by the revenue monitor.
 #   FACILITATOR_URL    - Override facilitator (defaults to https://facilitator.payai.network,
 #                        a free public facilitator with no signup required).
 #                        Must be a valid URL if set.
@@ -27,6 +31,17 @@ routes = [
 
 [vars]
 ENVIRONMENT = "development"
+
+# ── Revenue Monitoring ─────────────────────────────────────────────
+# Watermark and rolling payment history for the on-chain USDC watcher.
+[[kv_namespaces]]
+binding = "MONITOR"
+id = "18c22de5e5b846d4813431dcc92035e1"
+
+# Base produces a block every ~2s; a 5-minute sweep stays far inside the
+# eth_getLogs range cap while noticing a payment quickly enough to be useful.
+[triggers]
+crons = ["*/5 * * * *"]
 
 # ── Durable Objects ────────────────────────────────────────────────
 [[durable_objects.bindings]]

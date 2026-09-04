@@ -19,6 +19,7 @@ import webScraperHandler from "./handlers/web-scraper";
 import pdfParserHandler from "./handlers/pdf-parser";
 import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
+import { alert, readState, scanForPayments } from "./lib/revenue";
 import vaultHandler from "./handlers/vault";
 import { landingPage } from "./pages/landing";
 
@@ -130,6 +131,13 @@ app.get("/", (c) => {
             "Remote MCP server (Streamable HTTP). tools/list is free; each tool re-enters the paid route above and returns its x402 payment demand until paid.",
         },
         {
+          path: "/revenue",
+          method: "GET",
+          price: "free",
+          description:
+            "On-chain USDC received by this service, read from Base. Proof it transacts.",
+        },
+        {
           path: "/",
           method: "GET",
           price: "free",
@@ -180,6 +188,28 @@ app.route("/scrape", webScraperHandler);
 app.route("/pdf-parse", pdfParserHandler);
 app.route("/compress", tokenCompressorHandler);
 app.route("/vault", vaultHandler);
+
+/**
+ * Free: revenue is read from the chain, so publishing it costs nothing and
+ * gives both the operator and a prospective caller evidence the service is
+ * actually transacting.
+ */
+app.get("/revenue", async (c) => {
+  const state = await readState(c.env);
+
+  return c.json({
+    address: c.env.X402_PAY_TO,
+    asset: "USDC",
+    network: "base-mainnet",
+    lifetime_usdc: state.totalUsdc,
+    payment_count: state.paymentCount,
+    first_payment_at: state.firstPaymentAt,
+    last_payment_at: state.lastPaymentAt,
+    last_scanned_block: state.lastBlock,
+    recent: state.recent,
+    explorer: `https://basescan.org/address/${c.env.X402_PAY_TO}`,
+  });
+});
 
 // Free: tool discovery must be reachable or no MCP client can find us. The
 // tools themselves re-enter through the paid HTTP routes, dispatched in-process
@@ -639,4 +669,30 @@ async function handleRequest(
   }
 }
 
-export default { fetch: handleRequest };
+/**
+ * Sweeps the chain for USDC arriving at the receiving address.
+ *
+ * Errors are logged rather than rethrown: the watermark only advances on a
+ * successful scan, so a transient RPC failure is picked up by the next tick
+ * with nothing missed.
+ */
+async function handleScheduled(
+  _event: ScheduledController,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<void> {
+  try {
+    const { state, newPayments } = await scanForPayments(env);
+
+    if (newPayments.length > 0) {
+      console.log(
+        `Revenue: ${newPayments.length} new payment(s), lifetime $${state.totalUsdc}`,
+      );
+      ctx.waitUntil(alert(env, newPayments, state));
+    }
+  } catch (err) {
+    console.error("Revenue scan failed:", err);
+  }
+}
+
+export default { fetch: handleRequest, scheduled: handleScheduled };

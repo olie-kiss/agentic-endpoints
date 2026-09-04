@@ -3,6 +3,9 @@ export interface Env {
   ONCE_KEY: DurableObjectNamespace;
   VAULT: DurableObjectNamespace;
 
+  // Revenue watermark + rolling payment history
+  MONITOR: KVNamespace;
+
   // Rate limiters (per Cloudflare location)
   FREE_RATE_LIMITER: RateLimit;
   WRITE_RATE_LIMITER: RateLimit;
@@ -11,11 +14,16 @@ export interface Env {
   X402_PAY_TO: string;
   RECEIPT_SECRET: string;
 
-  // Optional: override facilitator URL (defaults to https://facilitator.xpay.sh)
+  // Optional: override facilitator URL (defaults to https://facilitator.payai.network)
   FACILITATOR_URL?: string;
   // Optional: only needed if you switch to the CDP Facilitator for Bazaar indexing
   CDP_API_KEY_ID?: string;
   CDP_API_KEY_SECRET?: string;
+
+  // Optional: Discord-compatible webhook, notified when USDC arrives on-chain
+  ALERT_WEBHOOK_URL?: string;
+  // Optional: override the Base RPC used for revenue monitoring
+  BASE_RPC_URL?: string;
 
   // Config
   ENVIRONMENT: string;
