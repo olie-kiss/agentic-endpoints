@@ -3,6 +3,7 @@ export interface Env {
   ONCE_KEY: DurableObjectNamespace;
   VAULT: DurableObjectNamespace;
   CREDITS: DurableObjectNamespace;
+  STATS: DurableObjectNamespace;
 
   // Revenue watermark + rolling payment history
   MONITOR: KVNamespace;
@@ -10,6 +11,7 @@ export interface Env {
   // Rate limiters (per Cloudflare location)
   FREE_RATE_LIMITER: RateLimit;
   WRITE_RATE_LIMITER: RateLimit;
+  PAID_RATE_LIMITER: RateLimit;
 
   // Secrets (set via `wrangler secret put`)
   X402_PAY_TO: string;

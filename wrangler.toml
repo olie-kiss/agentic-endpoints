@@ -69,6 +69,12 @@ class_name = "Vault"
 name = "CREDITS"
 class_name = "Credits"
 
+# Service-wide demand counters. One instance, written after the response via
+# waitUntil so measurement never sits in the request path.
+[[durable_objects.bindings]]
+name = "STATS"
+class_name = "Stats"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["OnceKey"]
@@ -80,6 +86,10 @@ new_sqlite_classes = ["Vault"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["Credits"]
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["Stats"]
 
 # ── Rate Limiting ──────────────────────────────────────────────────
 # Per-Cloudflare-location limits. Free endpoints are the abuse surface,
@@ -99,4 +109,16 @@ namespace_id = "1002"
 
   [ratelimits.simple]
   limit = 20
+  period = 60
+
+# Customers who prepaid are not the abuse surface: their balance is itself a
+# spend ceiling, so throttling them at the anonymous rate charged them for a
+# restriction aimed at someone else. Only reachable after the ledger confirms
+# a real, funded account.
+[[ratelimits]]
+name = "PAID_RATE_LIMITER"
+namespace_id = "1003"
+
+  [ratelimits.simple]
+  limit = 600
   period = 60

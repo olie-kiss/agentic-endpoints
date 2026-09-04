@@ -21,6 +21,7 @@ import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
 import creditsHandler, { creditsStub } from "./handlers/credits";
 import { hashToken } from "./lib/utils";
+import type { Outcome, StatsSummary } from "./durable-objects/stats";
 import {
   alert,
   alertFailure,
@@ -36,6 +37,7 @@ import { landingPage } from "./pages/landing";
 export { OnceKey } from "./durable-objects/once-key";
 export { Vault } from "./durable-objects/vault";
 export { Credits } from "./durable-objects/credits";
+export { Stats } from "./durable-objects/stats";
 
 const app = new Hono<{ Bindings: Env; Variables: { dispatch: Dispatcher } }>();
 
@@ -188,6 +190,17 @@ app.route("/credits", creditsHandler);
  * gives both the operator and a prospective caller evidence the service is
  * actually transacting.
  */
+/**
+ * Demand telemetry, published rather than kept private.
+ *
+ * An agent deciding whether to depend on a paid service has no way to tell a
+ * working product from an abandoned one, so usage counts are worth more in
+ * the open than hidden. Aggregates only: no addresses, no tokens, no bodies.
+ */
+app.get("/stats", async (c) => {
+  return c.json(await statsStub(c.env).summary());
+});
+
 app.get("/revenue", async (c) => {
   const state = await readState(c.env);
 
@@ -615,6 +628,53 @@ function buildRoutes(env: Env): RoutesConfig {
  */
 const INTERNAL_HEADER = "X-Internal-Dispatch";
 
+/**
+ * Rate limiting in two tiers: anonymous, then paying.
+ *
+ * A single anonymous budget was billing customers for a throttle aimed at
+ * abusers — someone who prepaid $25 was cut off at the same 60 requests a
+ * minute as unauthenticated traffic, which is the opposite of what they paid
+ * for.
+ *
+ * The higher tier is only reachable with a credit token the ledger actually
+ * recognises. Checking the header alone would have made the limit optional
+ * for everyone, since the header is attacker-controlled and free to invent.
+ *
+ * The paid limiter is still keyed by IP rather than by token. Keyed by token,
+ * a forged random token would mint a fresh budget on every request and the
+ * balance lookup behind it would become an amplification vector — unbounded
+ * storage reads for the cost of a header. Keyed by IP, the number of lookups
+ * an address can force is capped by the paid limit itself.
+ */
+export async function withinRateLimit(
+  request: Request,
+  env: Env,
+  ip: string,
+): Promise<boolean> {
+  const { success } = await env.FREE_RATE_LIMITER.limit({ key: ip });
+  if (success) return true;
+
+  const token = request.headers.get("X-Credit-Token");
+  if (!token) return false;
+
+  const { success: paidBudget } = await env.PAID_RATE_LIMITER.limit({ key: ip });
+  if (!paidBudget) return false;
+
+  try {
+    const tokenHash = await hashToken(token);
+    const ledger = await creditsStub(env, tokenHash).balance(tokenHash);
+
+    // An exhausted balance is not a customer any more. Their next request is
+    // going to be refused for lack of funds regardless, so it does not earn
+    // the elevated allowance.
+    return ledger !== null && ledger.balance_micros > 0;
+  } catch (err) {
+    // Fail closed: an unreadable ledger must not hand out the higher tier.
+    console.error("Paid-tier rate limit check failed:", err);
+    return false;
+  }
+}
+
 async function handleRequest(
   request: Request,
   env: Env,
@@ -651,9 +711,7 @@ async function handleRequest(
      */
     const internal = request.headers.get(INTERNAL_HEADER) === "1";
     const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-    const { success } = internal
-      ? { success: true }
-      : await env.FREE_RATE_LIMITER.limit({ key: ip });
+    const success = internal ? true : await withinRateLimit(request, env, ip);
     if (!success) {
       return Response.json(
         {
@@ -910,4 +968,86 @@ async function handleScheduled(
   }
 }
 
-export default { fetch: handleRequest, scheduled: handleScheduled };
+export default { fetch: withStats, scheduled: handleScheduled };
+
+/**
+ * Known paths, so a stranger cannot grow the stats table by requesting random
+ * URLs. Anything unrecognised is counted, but collapsed into one bucket.
+ */
+function bucketPath(env: Env, path: string): string {
+  if (isKnownPaidPath(env, path)) return path;
+  if (FREE_PATHS.has(path)) return path;
+  return "other";
+}
+
+const FREE_PATHS = new Set([
+  "/",
+  "/health",
+  "/mcp",
+  "/revenue",
+  "/stats",
+  "/credits/balance",
+]);
+
+function isKnownPaidPath(env: Env, path: string): boolean {
+  return Object.keys(buildRoutes(env)).some(
+    (route) => route.replace(/^[A-Z]+\s+/, "") === path,
+  );
+}
+
+export function statsStub(env: Env) {
+  // A single named instance: these are service-wide totals, and sharding them
+  // would mean merging shards on every read for no benefit at this volume.
+  return env.STATS.get(env.STATS.idFromName("global")) as unknown as {
+    record(path: string, outcome: Outcome): Promise<void>;
+    summary(): Promise<StatsSummary>;
+  };
+}
+
+/**
+ * Counts the request, then answers it.
+ *
+ * Recording happens after the response is produced and is handed to
+ * waitUntil, so measurement can never slow down or break a paying request —
+ * telemetry that can take the service down is worse than no telemetry. A
+ * failure to count is logged and swallowed for the same reason.
+ */
+async function withStats(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const response = await handleRequest(request, env, ctx);
+
+  // Internal MCP dispatch re-enters the pipeline; counting it would double
+  // every tool call and invent traffic that never existed.
+  if (request.headers.get(INTERNAL_HEADER) === "1") return response;
+
+  try {
+    const path = new URL(request.url).pathname;
+
+    // Operator endpoints are not demand. Counting them would mean every time
+    // the owner checked whether anyone was using the service, the answer got
+    // a little less true.
+    if (path === "/stats" || path === "/revenue" || path === "/health") {
+      return response;
+    }
+
+    const paid = isKnownPaidPath(env, path);
+
+    const outcome: Outcome =
+      response.status === 402
+        ? "challenged"
+        : response.status >= 400
+          ? "error"
+          : paid
+            ? "paid"
+            : "free";
+
+    ctx.waitUntil(statsStub(env).record(bucketPath(env, path), outcome));
+  } catch (err) {
+    console.error("Failed to record request stats:", err);
+  }
+
+  return response;
+}
