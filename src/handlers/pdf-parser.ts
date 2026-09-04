@@ -53,6 +53,16 @@ app.post("/", async (c) => {
     return errorResponse("Invalid url", 400);
   }
 
+  // Reject an unsafe URL before fetching. This 4xx is cheap and replay-safe,
+  // and it is what makes any UnsafeUrlError in the catch below provably
+  // post-fetch, so the two cases can be given different statuses.
+  try {
+    await assertSafeUrl(body.url);
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) return errorResponse(err.message, 400);
+    return errorResponse("Invalid url", 400);
+  }
+
   try {
     const result = await safeFetch(
       body.url,
@@ -108,14 +118,32 @@ app.post("/", async (c) => {
       extracted_at: new Date().toISOString(),
     });
   } catch (err) {
+    // Everything below happens after the outbound fetch, so it must be a 200
+    // with a machine-readable status: a >=400 cancels settlement on work
+    // already done and leaves the payment header replayable, which buys an
+    // attacker unlimited fetches from our egress for a single signature.
+    const base = {
+      url: body.url,
+      page_count: 0,
+      pages: [] as unknown[],
+      extracted_at: new Date().toISOString(),
+    };
+
+    // Redirect into a blocked target, or a body over the size cap.
     if (err instanceof UnsafeUrlError) {
-      return errorResponse(err.message, 400);
+      return c.json({ ...base, status: "blocked_redirect", detail: err.message });
     }
+
+    // Don't echo the upstream status text — it is a probe oracle.
     if (err instanceof UpstreamStatusError) {
-      return errorResponse(err.message, 502);
+      return c.json({
+        ...base,
+        status: "fetch_failed",
+        detail: "Upstream did not return a retrievable document",
+      });
     }
-    // Avoid reflecting raw network errors — they are an internal-host probe oracle.
-    return errorResponse("PDF parse failed", 502);
+
+    return c.json({ ...base, status: "fetch_failed", detail: "PDF fetch failed" });
   }
 });
 

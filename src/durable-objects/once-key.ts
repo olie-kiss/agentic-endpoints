@@ -212,8 +212,27 @@ export class OnceKey extends DurableObject<Env> {
     // The token is always minted here, never accepted from the caller: a
     // chosen token could be low-entropy or used to pre-claim someone else's
     // namespace with no recovery path.
+    //
+    // Only `claim` may take ownership. The free lifecycle actions used to
+    // reach this block too, and since `isAuthorized` returns true for an
+    // empty namespace, a bare `POST /once-key/complete` on a name nobody had
+    // used yet would mint a token, persist its hash, and then return 404 —
+    // the plaintext discarded, the namespace owned by a hash no one holds and
+    // deliberately unrecoverable. Anyone could brick every obvious namespace
+    // for free, permanently locking out the paying owner.
     let issuedToken: string | undefined;
     if (this.getOwnerHash() === null) {
+      if (action !== "claim") {
+        return Response.json(
+          {
+            error: "No live claim for this action_key.",
+            detail:
+              "This namespace has no claims. Claim an action_key before completing or releasing it.",
+          },
+          { status: 404 },
+        );
+      }
+
       const token = generateToken();
       const hash = await hashToken(token);
 

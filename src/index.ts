@@ -20,7 +20,7 @@ import pdfParserHandler from "./handlers/pdf-parser";
 import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
 import creditsHandler, { creditsStub } from "./handlers/credits";
-import { hashToken } from "./lib/utils";
+import { hashToken, timingSafeEqual } from "./lib/utils";
 import {
   buildLlmsTxt,
   buildOpenApi,
@@ -283,7 +283,7 @@ app.get("/revenue", async (c) => {
 // cost an extra round trip, be unreachable from tests, and re-run the limiter.
 app.use("/mcp", async (c, next) => {
   c.set("dispatch", (req: Request) => {
-    req.headers.set(INTERNAL_HEADER, "1");
+    req.headers.set(INTERNAL_HEADER, internalDispatchToken());
     // Hono models ExecutionContext structurally and lags the workers-types
     // definition; it is the same object at runtime.
     return handleRequest(req, c.env, c.executionCtx as unknown as ExecutionContext);
@@ -791,6 +791,49 @@ function buildRoutes(env: Env): RoutesConfig {
 const INTERNAL_HEADER = "X-Internal-Dispatch";
 
 /**
+ * A per-isolate value the caller cannot guess.
+ *
+ * This was a constant "1", so anyone could send the header themselves and skip
+ * the rate limiter and every usage counter — the only controls standing in
+ * front of the free endpoints. The marker has to be unforgeable because it is
+ * an exemption, not a hint.
+ *
+ * Generated lazily: Workers forbids random values in global scope.
+ */
+let internalToken: string | undefined;
+
+function internalDispatchToken(): string {
+  if (internalToken === undefined) internalToken = crypto.randomUUID();
+  return internalToken;
+}
+
+function isInternalDispatch(request: Request): boolean {
+  const marker = request.headers.get(INTERNAL_HEADER);
+  return marker !== null && timingSafeEqual(marker, internalDispatchToken());
+}
+
+/**
+ * The payment gate and the router must agree on what path was requested.
+ *
+ * `new URL(request.url).pathname` keeps percent-escapes; Hono's router decodes
+ * them before matching. That disagreement made the paid-path test fail open:
+ * `/compr%65ss` did not match any route key, returned early as a "free" path,
+ * and was then dispatched by Hono to the real `/compress` handler with the
+ * x402 middleware, the credit debit and the facilitator pre-flight all skipped.
+ *
+ * Percent-encoding carries no meaning for these static ASCII routes, so an
+ * encoded path is never a legitimate client — it is someone probing for
+ * exactly this gap. Rejecting is safer than decoding, because decoding can
+ * still disagree with the router (`/compress%2Ffoo` decodes to a path Hono
+ * routes elsewhere) and any disagreement is another instance of this bug.
+ */
+function canonicalPath(request: Request): string | null {
+  const raw = new URL(request.url).pathname;
+  if (!raw.includes("%")) return raw;
+  return null;
+}
+
+/**
  * Rate limiting in two tiers: anonymous, then paying.
  *
  * A single anonymous budget was billing customers for a throttle aimed at
@@ -871,7 +914,7 @@ async function handleRequest(
      * unpaid traffic it was meant to bound. An X-PAYMENT header is
      * unverified attacker-controlled input here and grants no exemption.
      */
-    const internal = request.headers.get(INTERNAL_HEADER) === "1";
+    const internal = isInternalDispatch(request);
     const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
     const success = internal ? true : await withinRateLimit(request, env, ip);
     if (!success) {
@@ -885,7 +928,16 @@ async function handleRequest(
     }
 
     // Free and unknown paths never touch the x402 stack.
-    const path = new URL(request.url).pathname;
+    const path = canonicalPath(request);
+    if (path === null) {
+      return Response.json(
+        {
+          error: "Not found",
+          detail: "Percent-encoded paths are not accepted. Use the literal path.",
+        },
+        { status: 404 },
+      );
+    }
     const isPaidPath = Object.keys(routes).some(
       (route) => route.replace(/^[A-Z]+\s+/, "") === path,
     );
@@ -1249,7 +1301,7 @@ async function withStats(
 
   // Internal MCP dispatch re-enters the pipeline; counting it would double
   // every tool call and invent traffic that never existed.
-  if (request.headers.get(INTERNAL_HEADER) === "1") return response;
+  if (isInternalDispatch(request)) return response;
 
   try {
     const path = new URL(request.url).pathname;

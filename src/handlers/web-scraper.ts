@@ -115,9 +115,22 @@ app.post("/", async (c) => {
     // The URL was already validated as safe above, so reaching here means the
     // fetch itself failed — work we have already paid for. Report it as a
     // 200 result rather than a 4xx/5xx, which would cancel settlement.
+    // Only reachable via a redirect into a blocked target, or a response that
+    // exceeded the size cap — both happen *after* the outbound fetch. A 4xx
+    // here would cancel settlement on work already performed and leave the
+    // caller's payment header replayable, turning one signature into an
+    // unlimited fetch generator.
     if (err instanceof UnsafeUrlError) {
-      // Only reachable via a redirect into a blocked target.
-      return errorResponse(err.message, 400);
+      return c.json({
+        url: body.url,
+        status: "blocked_redirect",
+        detail: err.message,
+        title: "",
+        content: "",
+        format,
+        truncated: false,
+        extracted_at: new Date().toISOString(),
+      });
     }
 
     const detail =

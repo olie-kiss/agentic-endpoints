@@ -122,3 +122,46 @@ describe("OnceKey ttl validation", () => {
     expect(res.status).toBe(400);
   });
 });
+
+/**
+ * The namespace claim ran for every action, including the two free ones, and
+ * `isAuthorized(undefined)` is true for an empty namespace. So a bare
+ * `POST /once-key/complete` on an unused name minted a token, persisted its
+ * hash, then returned 404 — discarding the plaintext and leaving the namespace
+ * owned by a hash nobody holds, with no recovery path by design. Anyone could
+ * brick every guessable namespace for free and permanently lock out the
+ * paying owner.
+ */
+describe("OnceKey free actions cannot take ownership", () => {
+  async function act(
+    namespace: string,
+    action: "complete" | "release",
+    body: Record<string, unknown>,
+  ) {
+    const stub = env.ONCE_KEY.get(env.ONCE_KEY.idFromName(namespace));
+    const res = await stub.fetch(
+      new Request(`https://internal/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+    return { status: res.status, json: await res.json<Record<string, unknown>>() };
+  }
+
+  for (const action of ["complete", "release"] as const) {
+    it(`${action} on an unclaimed namespace leaves it claimable`, async () => {
+      const n = ns();
+
+      const attack = await act(n, action, { action_key: "a" });
+      expect(attack.status).toBe(404);
+      expect(attack.json.namespace_token).toBeUndefined();
+
+      // The rightful owner must still be able to claim it afterwards.
+      const owner = await claim(n, { action_key: "a" });
+      expect(owner.status).toBe(200);
+      expect(owner.json.status).toBe("claimed");
+      expect(typeof owner.json.namespace_token).toBe("string");
+    });
+  }
+});

@@ -2,6 +2,8 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+.env
+.env.*
 *.log
 
 # Signing keys (MCP Registry DNS auth)
