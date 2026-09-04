@@ -45,6 +45,26 @@ export class Stats extends DurableObject<Env> {
         value TEXT NOT NULL
       )
     `);
+    // Latency is kept as a bucketed histogram rather than raw samples. Raw
+    // samples would grow without bound and force a sort on every read; the
+    // histogram answers "is this fast enough to depend on" just as well.
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS latency (
+        day     TEXT NOT NULL,
+        bucket  INTEGER NOT NULL,
+        count   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, bucket)
+      )
+    `);
+    // One row per cron tick. The scheduled handler fires every 5 minutes, so
+    // a gap in this table is the service having been unable to run — which is
+    // an outage measured by the same system that would have served requests,
+    // rather than a number asserted with nothing behind it.
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS ticks (
+        ts TEXT PRIMARY KEY
+      )
+    `);
     this.initialized = true;
   }
 
@@ -53,7 +73,11 @@ export class Stats extends DurableObject<Env> {
    * knows its own route table, and letting raw URLs in here would let any
    * stranger grow this table without bound by requesting random paths.
    */
-  async record(path: string, outcome: Outcome): Promise<void> {
+  async record(
+    path: string,
+    outcome: Outcome,
+    durationMs?: number,
+  ): Promise<void> {
     this.ensureTable();
     const now = new Date().toISOString();
     const day = now.slice(0, 10);
@@ -65,6 +89,15 @@ export class Stats extends DurableObject<Env> {
       path,
       outcome,
     );
+
+    if (typeof durationMs === "number" && Number.isFinite(durationMs)) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO latency (day, bucket, count) VALUES (?, ?, 1)
+         ON CONFLICT (day, bucket) DO UPDATE SET count = count + 1`,
+        day,
+        bucketFor(durationMs),
+      );
+    }
 
     this.ctx.storage.sql.exec(
       `INSERT INTO meta (key, value) VALUES ('first_seen', ?)
@@ -83,6 +116,100 @@ export class Stats extends DurableObject<Env> {
       .toISOString()
       .slice(0, 10);
     this.ctx.storage.sql.exec(`DELETE FROM hits WHERE day < ?`, cutoff);
+    this.ctx.storage.sql.exec(`DELETE FROM latency WHERE day < ?`, cutoff);
+  }
+
+  /**
+   * Records that the scheduled handler ran. Called from cron, not from a
+   * request: a liveness signal produced by traffic only proves the service
+   * was up at the moments someone happened to ask.
+   */
+  async heartbeat(): Promise<void> {
+    this.ensureTable();
+    const now = new Date();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO ticks (ts) VALUES (?) ON CONFLICT (ts) DO NOTHING`,
+      now.toISOString(),
+    );
+    this.ctx.storage.sql.exec(
+      `DELETE FROM ticks WHERE ts < ?`,
+      new Date(now.getTime() - 48 * 3_600_000).toISOString(),
+    );
+  }
+
+  /**
+   * Reliability evidence, published openly.
+   *
+   * An agent deciding whether to route paid work through a stranger's API has
+   * no way to tell a maintained service from one that will disappear next
+   * week. Everything here is derived from what actually happened rather than
+   * asserted, and returns null while there is genuinely nothing to report —
+   * a fabricated "100%" from zero samples is worse than an honest gap.
+   */
+  async slo(): Promise<Slo> {
+    this.ensureTable();
+    const now = Date.now();
+    const since = new Date(now - 86_400_000).toISOString();
+
+    const ticks = this.ctx.storage.sql
+      .exec(`SELECT ts FROM ticks WHERE ts >= ? ORDER BY ts`, since)
+      .toArray() as unknown as { ts: string }[];
+
+    let uptime: string | null = null;
+    let window: string | null = null;
+    if (ticks.length > 0) {
+      // Only credit the period actually observed. Claiming 24h of uptime from
+      // an hour of ticks would be an outright lie on the first day.
+      const firstMs = Date.parse(ticks[0].ts);
+      const observedMs = Math.max(now - firstMs, CRON_PERIOD_MS);
+      const expected = Math.max(1, Math.round(observedMs / CRON_PERIOD_MS));
+      uptime = `${Math.min(100, (ticks.length / expected) * 100).toFixed(2)}%`;
+      window = `${(observedMs / 3_600_000).toFixed(1)}h`;
+    }
+
+    const today = new Date(now).toISOString().slice(0, 10);
+    const yesterday = new Date(now - 86_400_000).toISOString().slice(0, 10);
+
+    const hits = this.ctx.storage.sql
+      .exec(
+        `SELECT outcome, SUM(count) AS n FROM hits
+          WHERE day IN (?, ?) GROUP BY outcome`,
+        today,
+        yesterday,
+      )
+      .toArray() as unknown as { outcome: Outcome; n: number }[];
+
+    const requests = hits.reduce((a, h) => a + h.n, 0);
+    const errors = hits.find((h) => h.outcome === "error")?.n ?? 0;
+
+    const buckets = this.ctx.storage.sql
+      .exec(
+        `SELECT bucket, SUM(count) AS n FROM latency
+          WHERE day IN (?, ?) GROUP BY bucket ORDER BY bucket`,
+        today,
+        yesterday,
+      )
+      .toArray() as unknown as { bucket: number; n: number }[];
+
+    return {
+      uptime_24h: uptime,
+      uptime_window: window,
+      cron_ticks_24h: ticks.length,
+      requests_48h: requests,
+      error_rate_48h:
+        requests > 0 ? `${((errors / requests) * 100).toFixed(2)}%` : null,
+      latency_ms: {
+        // Named "at most" on purpose: a histogram bounds a percentile, it
+        // does not measure one, and rounding that away invites a client to
+        // set a timeout the service was never promised to meet.
+        p50_at_most: percentileBucket(buckets, 0.5),
+        p95_at_most: percentileBucket(buckets, 0.95),
+        p99_at_most: percentileBucket(buckets, 0.99),
+      },
+      measured_by:
+        "Derived from this service's own request log and 5-minute cron ticks. " +
+        "A missed tick counts against uptime. Null means not enough data yet.",
+    };
   }
 
   async summary(): Promise<StatsSummary> {
@@ -145,6 +272,73 @@ export class Stats extends DurableObject<Env> {
 }
 
 export type Outcome = "challenged" | "paid" | "free" | "error";
+
+/** Cron fires every 5 minutes; see the schedule in wrangler.toml. */
+const CRON_PERIOD_MS = 5 * 60_000;
+
+/**
+ * Histogram edges, in milliseconds. Dense at the low end because the useful
+ * distinctions for an edge API are all below a second; anything slower is
+ * equally "too slow" to a caller deciding on a timeout.
+ */
+export const LATENCY_BUCKETS = [
+  5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+] as const;
+
+/** Sentinel for samples above the largest edge. */
+export const OVERFLOW_BUCKET = -1;
+
+export function bucketFor(ms: number): number {
+  for (const edge of LATENCY_BUCKETS) {
+    if (ms <= edge) return edge;
+  }
+  return OVERFLOW_BUCKET;
+}
+
+/**
+ * The smallest bucket edge at or below which `p` of the samples fall.
+ *
+ * Returns null when there are no samples, and null for the overflow bucket
+ * rather than inventing an upper bound that was never observed.
+ */
+export function percentileBucket(
+  buckets: { bucket: number; n: number }[],
+  p: number,
+): number | null {
+  const total = buckets.reduce((a, b) => a + b.n, 0);
+  if (total === 0) return null;
+
+  const ordered = [...buckets].sort((a, b) =>
+    a.bucket === OVERFLOW_BUCKET
+      ? 1
+      : b.bucket === OVERFLOW_BUCKET
+        ? -1
+        : a.bucket - b.bucket,
+  );
+
+  let seen = 0;
+  for (const b of ordered) {
+    seen += b.n;
+    if (seen >= total * p) {
+      return b.bucket === OVERFLOW_BUCKET ? null : b.bucket;
+    }
+  }
+  return null;
+}
+
+export interface Slo {
+  uptime_24h: string | null;
+  uptime_window: string | null;
+  cron_ticks_24h: number;
+  requests_48h: number;
+  error_rate_48h: string | null;
+  latency_ms: {
+    p50_at_most: number | null;
+    p95_at_most: number | null;
+    p99_at_most: number | null;
+  };
+  measured_by: string;
+}
 
 export interface StatsSummary {
   totals: {

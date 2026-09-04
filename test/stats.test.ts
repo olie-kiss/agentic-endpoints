@@ -110,3 +110,78 @@ describe("the public summary", () => {
     expect(text).not.toContain("0x");
   });
 });
+
+import {
+  bucketFor,
+  percentileBucket,
+  OVERFLOW_BUCKET,
+} from "../src/durable-objects/stats";
+
+/**
+ * The histogram maths is tested as pure functions rather than through the
+ * network. Driving it via requests would mean sleeping to let a waitUntil
+ * write land, and a test that sleeps is a test that will flake.
+ */
+describe("latency histogram", () => {
+  it("puts a sample in the first bucket it does not exceed", () => {
+    expect(bucketFor(0)).toBe(5);
+    expect(bucketFor(5)).toBe(5);
+    expect(bucketFor(6)).toBe(10);
+    expect(bucketFor(999)).toBe(1000);
+    expect(bucketFor(5000)).toBe(5000);
+  });
+
+  it("marks anything past the largest edge as overflow", () => {
+    expect(bucketFor(5001)).toBe(OVERFLOW_BUCKET);
+    expect(bucketFor(60_000)).toBe(OVERFLOW_BUCKET);
+  });
+
+  it("reports null rather than a percentile from no samples", () => {
+    expect(percentileBucket([], 0.5)).toBeNull();
+  });
+
+  it("bounds the percentile from the bucket counts", () => {
+    const buckets = [
+      { bucket: 10, n: 50 },
+      { bucket: 100, n: 45 },
+      { bucket: 1000, n: 5 },
+    ];
+    expect(percentileBucket(buckets, 0.5)).toBe(10);
+    expect(percentileBucket(buckets, 0.95)).toBe(100);
+    expect(percentileBucket(buckets, 0.99)).toBe(1000);
+  });
+
+  it("does not invent an upper bound when the tail overflowed", () => {
+    const buckets = [
+      { bucket: 10, n: 90 },
+      { bucket: OVERFLOW_BUCKET, n: 10 },
+    ];
+    expect(percentileBucket(buckets, 0.5)).toBe(10);
+    // The slowest 10% were only known to be "over 5s". Reporting 5000 here
+    // would let a caller set a timeout the service never promised to meet.
+    expect(percentileBucket(buckets, 0.99)).toBeNull();
+  });
+
+  it("sorts the overflow bucket last despite its sentinel value", () => {
+    // -1 sorts first numerically; if that leaked through, every percentile
+    // would be computed against the slowest requests first.
+    const buckets = [
+      { bucket: OVERFLOW_BUCKET, n: 1 },
+      { bucket: 5, n: 99 },
+    ];
+    expect(percentileBucket(buckets, 0.5)).toBe(5);
+  });
+});
+
+describe("public SLO endpoint", () => {
+  it("serves reliability evidence with an honest provenance note", async () => {
+    const res = await SELF.fetch("https://ai.oliverkiss.com/status");
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as any;
+    expect(body).toHaveProperty("uptime_24h");
+    expect(body).toHaveProperty("error_rate_48h");
+    expect(body.latency_ms).toHaveProperty("p95_at_most");
+    expect(body.measured_by).toContain("cron");
+  });
+});

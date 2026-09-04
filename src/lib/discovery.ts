@@ -297,6 +297,11 @@ export function buildLlmsTxt(routes: RoutesConfig, origin: string): string {
   lines.push(`- \`GET ${origin}/health\` — liveness`);
   lines.push(`- \`GET ${origin}/stats\` — usage counts, published openly so you`);
   lines.push("  can tell a maintained service from an abandoned one");
+  lines.push(
+    `- \`GET ${origin}/status\` — uptime, error rate and latency, derived` +
+      " from this service's own cron ticks and request log, so you can judge",
+  );
+  lines.push("  whether it is safe to route paid work through");
   lines.push(`- \`GET ${origin}/openapi.json\` — OpenAPI 3.1 description`);
   for (const free of FREE_POST_ENDPOINTS) {
     lines.push(`- \`POST ${origin}${free.path}\` — ${free.summary}`);
@@ -344,7 +349,14 @@ export function buildRobotsTxt(origin: string): string {
 
 /** A sitemap listing only the free, crawlable documents. */
 export function buildSitemap(origin: string): string {
-  const urls = ["/", "/llms.txt", "/openapi.json", "/stats", "/health"];
+  const urls = [
+    "/",
+    "/llms.txt",
+    "/openapi.json",
+    "/stats",
+    "/status",
+    "/health",
+  ];
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',

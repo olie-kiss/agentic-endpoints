@@ -27,7 +27,7 @@ import {
   buildRobotsTxt,
   buildSitemap,
 } from "./lib/discovery";
-import type { Outcome, StatsSummary } from "./durable-objects/stats";
+import type { Outcome, StatsSummary, Slo } from "./durable-objects/stats";
 import {
   alert,
   alertFailure,
@@ -236,6 +236,18 @@ app.route("/credits", creditsHandler);
  */
 app.get("/stats", async (c) => {
   return c.json(await statsStub(c.env).summary());
+});
+
+/**
+ * Reliability evidence for a machine deciding whether to depend on this.
+ *
+ * An agent choosing between paid APIs cannot tell a maintained service from
+ * an abandoned one, and no other x402 endpoint publishes anything to help it.
+ * Everything here is derived from recorded behaviour, and reports null rather
+ * than a flattering default when there is not yet enough data.
+ */
+app.get("/status", async (c) => {
+  return c.json(await statsStub(c.env).slo());
 });
 
 app.get("/revenue", async (c) => {
@@ -1032,6 +1044,11 @@ async function handleScheduled(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<void> {
+  // Recorded first and unconditionally. A heartbeat written only after a
+  // successful revenue scan would turn "the chain RPC is down" into a
+  // reported outage of this service.
+  ctx.waitUntil(statsStub(env).heartbeat());
+
   try {
     const { state, newPayments } = await scanForPayments(env);
 
@@ -1066,6 +1083,7 @@ const FREE_PATHS = new Set([
   "/mcp",
   "/revenue",
   "/stats",
+  "/status",
   "/credits/balance",
   // Counted individually rather than lumped into "other": a hit on one of
   // these is a machine reading the documentation, which is the earliest
@@ -1122,8 +1140,10 @@ export function statsStub(env: Env) {
   // A single named instance: these are service-wide totals, and sharding them
   // would mean merging shards on every read for no benefit at this volume.
   return env.STATS.get(env.STATS.idFromName("global")) as unknown as {
-    record(path: string, outcome: Outcome): Promise<void>;
+    record(path: string, outcome: Outcome, durationMs?: number): Promise<void>;
     summary(): Promise<StatsSummary>;
+    slo(): Promise<Slo>;
+    heartbeat(): Promise<void>;
   };
 }
 
@@ -1140,6 +1160,7 @@ async function withStats(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  const started = Date.now();
   const response = await handleRequest(request, env, ctx);
 
   // Internal MCP dispatch re-enters the pipeline; counting it would double
@@ -1150,7 +1171,13 @@ async function withStats(
     const path = new URL(request.url).pathname;
     const counted = classify(path, response.status, isKnownPaidPath(env, path));
     if (counted) {
-      ctx.waitUntil(statsStub(env).record(counted.bucket, counted.outcome));
+      ctx.waitUntil(
+        statsStub(env).record(
+          counted.bucket,
+          counted.outcome,
+          Date.now() - started,
+        ),
+      );
     }
   } catch (err) {
     console.error("Failed to record request stats:", err);
