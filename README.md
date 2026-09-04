@@ -114,6 +114,7 @@ CDP Bazaar is skipped for exactly that reason.
 | PayAI Bazaar | Not listed on mainnet — **mechanism proven on testnet** | Listing requires a payment that *settles*, once per route; reaching `/verify` does nothing. Confirmed on Base Sepolia: all 9 routes appeared in `/discovery/resources` within seconds of paying. `X402_TEST_PRIVATE_KEY=0x... node scripts/trigger-indexing.mjs` costs **$0.068** for the whole catalogue |
 | x402-list.com | Submitted, pending review | `POST /api/v1/submit`; free because the service is on a custom domain |
 | Official MCP Registry | **Published — `com.oliverkiss/agentic-endpoints`, status active** | `./scripts/publish-registry.sh`. Ownership proven by an apex TXT record and an ed25519-signed timestamp, so no financial account is involved |
+| npm | **Published — [`agentic-endpoints`](https://www.npmjs.com/package/agentic-endpoints)** | `cd sdk && npm publish`. Counts as discovery, not just convenience: npm is crawled by every AI coding assistant, so the client is findable by the same models that would use the service |
 | Smithery | Not yet | `smithery mcp publish https://ai.oliverkiss.com/mcp -n @olie-kiss/agentic-endpoints` (needs a browser login) |
 
 Aggregators such as PulseMCP ingest from the official registry, so publishing
