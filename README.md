@@ -8,7 +8,9 @@ Live at **https://ai.oliverkiss.com**
 
 | Route | Method | Price | Description |
 |-------|--------|-------|-------------|
-| `/once-key` | POST | $0.001 | Atomic idempotency witness — claim a key exactly once |
+| `/once-key` | POST | $0.001 | Claim an action exactly once, and replay its recorded result |
+| `/once-key/complete` | POST | Free | Record the outcome of a claimed action |
+| `/once-key/release` | POST | Free | Surrender a claim whose work failed |
 | `/scrape` | POST | $0.005 | Web scraping and text extraction |
 | `/pdf-parse` | POST | $0.01 | PDF text extraction from a URL |
 | `/compress` | POST | $0.005 | Token compression / context reduction for LLMs |
@@ -16,6 +18,8 @@ Live at **https://ai.oliverkiss.com**
 | `/vault/retrieve` | POST | $0.02 | Retrieve a client-encrypted item |
 | `/vault/delete` | POST | $0.005 | Delete an item |
 | `/vault/exists` | POST | $0.001 | Check whether an item exists |
+| `/vault/list` | POST | $0.001 | List the keys in a namespace (metadata only) |
+| `/vault/rotate-token` | POST | Free | Replace a namespace token that may have leaked |
 | `/credits/buy` | POST | $5.00 | Buy $6.00 of prepaid credit (20% bonus) |
 | `/credits/buy-25` | POST | $25.00 | Buy $32.50 of prepaid credit (30% bonus) |
 | `/credits/balance` | POST | Free | Check a credit balance |
@@ -23,6 +27,10 @@ Live at **https://ai.oliverkiss.com**
 | `/mcp` | POST | Free to list | Remote MCP server; each tool costs its route's price |
 | `/` | GET | Free | Service discovery (JSON) or landing page (HTML) |
 | `/health` | GET | Free | Health check |
+| `/status` | GET | Free | Uptime, error rate and latency, derived from recorded behaviour |
+| `/stats` | GET | Free | Demand funnel: challenged, paid, free, by route |
+| `/llms.txt` | GET | Free | Prose description for a model given only a URL |
+| `/openapi.json` | GET | Free | OpenAPI 3.1 description |
 
 `GET /` content-negotiates: send `Accept: application/json` for the machine-readable
 endpoint catalogue, anything else gets the HTML landing page.
@@ -103,13 +111,19 @@ CDP Bazaar is skipped for exactly that reason.
 
 | Catalog | Status | How |
 |---|---|---|
-| PayAI Bazaar | Listed — all 8 routes | Automatic; PayAI indexes on `/verify`, so routes list before first payment. Re-announce with `node scripts/trigger-indexing.mjs` after any route change |
+| PayAI Bazaar | **Not listed** | Believed automatic for a long time; it is not. Paging the whole catalogue found 0 of 28,095 entries were ours. PayAI indexes a resource only when a payment **verifies successfully**, and every verify so far has failed on `insufficient_balance`. Needs ~$1 of USDC in a payer wallet, not a code change |
 | x402-list.com | Submitted, pending review | `POST /api/v1/submit`; free because the service is on a custom domain |
-| Official MCP Registry | Pending DNS record | `./scripts/publish-registry.sh` |
+| Official MCP Registry | Pending DNS record | `./scripts/publish-registry.sh` (verified: validates the manifest, fails cleanly until the TXT record exists) |
 | Smithery | Not yet | `smithery mcp publish https://ai.oliverkiss.com/mcp -n @olie-kiss/agentic-endpoints` (needs a browser login) |
 
 Aggregators such as PulseMCP ingest from the official registry, so publishing
-there covers several directories at once.
+there covers several directories at once. Directories that crawl source repos
+see nothing while this repo is private.
+
+Machine-readable descriptions are generated from the same pricing table that
+gates payment, so they cannot drift from what is actually charged: `/llms.txt`
+for a model handed a bare URL, `/openapi.json` for tooling, plus `/robots.txt`
+and `/sitemap.xml`. Tests assert the prices agree across all of them.
 
 ## Revenue Monitoring
 
@@ -134,6 +148,58 @@ genesis; scanning millions of blocks through a public RPC node would fail
 repeatedly and never establish a watermark at all. The watermark advances only
 on a successful scan, so a transient RPC failure is retried on the next tick
 with nothing missed.
+
+## Published SLOs
+
+An agent choosing between two paid services has no way to tell which one works.
+`GET /status` is free and answers that from recorded behaviour, not a promise:
+
+```json
+{
+  "uptime_24h": "100.00%",
+  "uptime_window": "0.5h",
+  "cron_ticks_24h": 6,
+  "requests_48h": 88,
+  "error_rate_48h": "0.00%",
+  "unknown_path_requests_48h": 10,
+  "latency_ms": { "p50_at_most": 25, "p95_at_most": 500, "p99_at_most": 500 }
+}
+```
+
+Getting the number *honest* mattered more than getting it published. It first
+shipped reporting an 11.39% error rate; every one of those was a 404 on a path
+that never existed — my own probes and passing crawlers — plus tokens that were
+correctly rejected. An agent reading that would have taken its money elsewhere
+and been right to. So client errors (4xx) are counted separately from failures
+(5xx), and requests to unknown paths are excluded from the rate entirely and
+surfaced as a raw count instead. Otherwise any stranger could degrade our
+published reliability just by scanning for `/wp-admin`.
+
+Latency comes from histogram buckets, so the figures are reported as
+`p95_at_most` — a bound, which is what a bucket can honestly support, rather
+than a precise percentile it cannot. Uptime credits only the window actually
+observed, so day one does not claim 24 hours from an hour of heartbeats. The
+heartbeat is written *before* the revenue scan, so an outage at a public RPC
+node is not reported as ours.
+
+`GET /stats` publishes the demand funnel — challenged, paid, free, per route —
+which is the only thing that distinguishes "nobody has found us" from "agents
+arrive and decline to pay".
+
+## Client SDK
+
+[`sdk/`](./sdk) is a dependency-free TypeScript client. It deliberately does
+**not** sign payments — it takes a credit token, or your own x402-aware
+`fetch`, so it never needs a private key.
+
+```bash
+npm install agentic-endpoints
+```
+
+Its reason to exist is `exactlyOnce`, which collapses the claim/complete/release
+protocol into one call: it handles all four claim outcomes, records the result
+so later callers can replay it, releases the claim if your work throws, and
+rethrows your error untouched.
 
 ## Stack
 
@@ -199,7 +265,12 @@ node scripts/paid-test.mjs /compress
 
 ## API Examples
 
-### OnceKey (idempotency witness)
+### OnceKey (exactly-once execution)
+
+A claim on its own is only half an idempotency key. The agent that *loses*
+the race needs to know what happened, or it has to either block forever or
+repeat the side effect anyway — which is the failure this endpoint exists to
+prevent. So the lifecycle is three calls, and only the first one costs money.
 
 ```json
 POST /once-key
@@ -207,12 +278,44 @@ POST /once-key
   "namespace": "payment-webhooks",
   "action_key": "stripe_evt_abc123",
   "payload_sha256": "e3b0c44298fc...",
-  "ttl": 86400
+  "ttl": 86400,
+  "lease_ttl": 300
 }
 ```
 
-Returns `status: "claimed"` the first time, `"duplicate"` afterwards, and
-`"conflict"` if the same key is replayed with a different payload hash.
+| `status` | Meaning |
+|---|---|
+| `claimed` | You won. Do the work, then call `/once-key/complete` |
+| `duplicate` | Already done. `result` holds the original outcome — use it |
+| `in_progress` | Another caller holds a live lease. Wait `retry_after`; do **not** do the work |
+| `conflict` | Same key, different payload hash. Your key derivation is wrong; never retry |
+
+```json
+POST /once-key/complete          // free
+{ "namespace": "...", "action_key": "...", "namespace_token": "...",
+  "result": { "charge_id": "ch_abc" } }
+```
+
+Every later claim of that key returns `duplicate` **with that result**.
+
+If the work fails, `POST /once-key/release` (free) frees the key immediately.
+
+**`lease_ttl` is opt-in, deliberately.** Without it a claim is held for its
+full `ttl` and nothing can ever run your side effect twice. With it, a
+claimant that crashes is presumed dead once the lease lapses and the next
+caller takes over with `recovered: true`. Leases on by default would have
+made every key claimed by the original claim-only API silently reclaimable —
+a duplicated charge is a far worse failure than a key that needs a retry
+under a fresh name.
+
+The [`agentic-endpoints` npm package](./sdk) wraps all of this in one call:
+
+```ts
+const { outcome, result } = await client.exactlyOnce(
+  { namespace: "billing", actionKey: `charge:${order.id}`, leaseTtl: 300 },
+  async () => stripe.charges.create({ amount: order.total }),
+);
+```
 
 ### Web scraper
 
@@ -263,8 +366,21 @@ POST /vault/retrieve
 { "namespace": "my-app", "key": "secret-1", "namespace_token": "30ab4b26..." }
 ```
 
-Lose the token and the namespace is unrecoverable by design — there is no
-account to reset it against.
+Writes are last-write-wins unless you say otherwise, so two agents rotating
+the same secret would clobber each other silently. Pass `if_match` with the
+item's current `updated_at` for a compare-and-swap, or `if_absent` to create
+only; either answers `status: "precondition_failed"` instead of overwriting.
+
+`POST /vault/list` ($0.001) returns the keys and their versions but never any
+ciphertext — that is what the $0.02 retrieve is for.
+
+**Rotate a token you think has leaked**, with `POST /vault/rotate-token`. It
+is free: putting a price on the correct response to a suspected leak is how
+you get callers who never rotate. It requires the *current* token, and there
+is no recovery if that is lost — any path that could restore access without
+it would be a second way in, and would serve an attacker just as readily as
+the owner. Lose it and the namespace is gone by design; there is no account
+to reset it against.
 
 ## Limits
 
@@ -286,7 +402,19 @@ Paid requests are not rate limited — each one already costs the caller USDC.
   response bodies bounded. It fails closed.
 - **Vault and OnceKey namespaces are ownership-gated.** The first request to a
   namespace is issued a one-time `namespace_token`; tokens are stored only as
-  SHA-256 hashes and compared in constant time.
+  SHA-256 hashes and compared in constant time. Vault tokens can be rotated;
+  OnceKey tokens cannot yet.
+- **The vault cannot read your values, but it does see their names.** No key
+  held here can decrypt anything, and plaintext is never received. But the
+  item key, the namespace, the `alg` label and the size are all stored in the
+  clear, so the service can tell *which* named secrets you hold and how large
+  they are. `alg` is an advisory label: nothing here can verify that what you
+  sent was in fact encrypted. Use high-entropy namespace names — ownership is
+  first-writer-wins, so a guessable namespace can be squatted.
+- **Paid routes answer completed work with 200 and a `status` field**, never a
+  4xx. The x402 middleware cancels settlement above 399, so a 4xx returned
+  after the work is done gives the answer away free and leaves the payment
+  header replayable.
 - **Receipts are HMAC-signed** with `RECEIPT_SECRET`. Note that only `/once-key`
   and the vault endpoints return a `receipt` — the stateless utilities
   (`/pdf-parse`, `/scrape`, `/compress`) do not.
@@ -307,9 +435,21 @@ services such as Mercury and Sphere Pay are not an option.
 
 ## Known Gaps
 
-- **Bazaar auto-indexing is not active.** Discovery metadata is declared on every
-  paid route, but the public xpay facilitator reports no extensions. Indexing
-  needs a Bazaar-capable facilitator (Coinbase CDP), which requires a CDP API key.
+- **No payment has ever settled.** Revenue is $0.00. The pipeline is verified
+  end to end as far as broadcast (`node scripts/paid-test.mjs --allow-unfunded
+  /compress`), and fails only on `insufficient_balance` — but the last step is
+  unproven until a real payment lands.
+- **Not in the PayAI Bazaar.** Long assumed to be automatic; it is not. Paging
+  the full catalogue found 0 of 28,095 entries were ours. PayAI indexes only on
+  a *successful* verify, so this needs ~$1 of USDC, not a code change.
+- **No evidence of demand.** `/stats` records the funnel precisely so that
+  "nobody has found us" and "agents arrive and refuse to pay" stop looking
+  identical. So far the answer is the first one.
+- **`/scrape`, `/pdf-parse` and `/compress` compete with free libraries.** The
+  defensible endpoints are `/once-key` and `/vault`: coordination primitives a
+  single agent cannot self-host, because they answer questions about what
+  *other* agents have done.
+- OnceKey namespace tokens cannot be rotated (vault's now can).
 - The `extractive` compression strategy is heuristic and unvalidated against real
   agent workloads.
 
