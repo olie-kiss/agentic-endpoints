@@ -14,7 +14,7 @@ compatibility_flags = ["nodejs_compat"]
 #                        an absent secret would sign with a known key.
 #
 # Optional:
-#   FACILITATOR_URL    - Override facilitator (defaults to https://facilitator.xpay.sh,
+#   FACILITATOR_URL    - Override facilitator (defaults to https://facilitator.payai.network,
 #                        a free public facilitator with no signup required).
 #                        Must be a valid URL if set.
 

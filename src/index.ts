@@ -344,6 +344,118 @@ export default {
           },
         }),
       },
+      "/vault/store": {
+        accepts: {
+          scheme: "exact",
+          network: BASE,
+          payTo: env.X402_PAY_TO,
+          price: "$0.02",
+        },
+        description:
+          "Store an encrypted item in the vault. The first store claims the namespace and returns a one-time namespace_token.",
+        extensions: declareDiscoveryExtension({
+          bodyType: "json",
+          inputSchema: {
+            type: "object",
+            properties: {
+              namespace: { type: "string", description: "Vault isolation scope" },
+              key: { type: "string", description: "Item key" },
+              ciphertext: {
+                type: "string",
+                description:
+                  "Client-side encrypted payload. This service never sees plaintext.",
+              },
+              alg: {
+                type: "string",
+                description: "Encryption algorithm label (default aes-256-gcm)",
+              },
+              ttl: {
+                type: "number",
+                description: "Optional lifetime in seconds",
+              },
+              namespace_token: {
+                type: "string",
+                description:
+                  "Required once the namespace has been claimed by a first store",
+              },
+            },
+            required: ["namespace", "key", "ciphertext"],
+          },
+          output: {
+            example: {
+              status: "stored",
+              namespace: "my-app",
+              key: "secret-1",
+              alg: "aes-256-gcm",
+              size_bytes: 128,
+              created_at: "2026-01-01T00:00:00.000Z",
+              updated_at: "2026-01-01T00:00:00.000Z",
+              expires_at: null,
+              namespace_token: "shown-once-on-first-store",
+              receipt: "abc123...",
+            },
+          },
+        }),
+      },
+
+      "/vault/delete": {
+        accepts: {
+          scheme: "exact",
+          network: BASE,
+          payTo: env.X402_PAY_TO,
+          price: "$0.005",
+        },
+        description:
+          "Delete an item from the vault (requires the namespace_token)",
+        extensions: declareDiscoveryExtension({
+          bodyType: "json",
+          inputSchema: {
+            type: "object",
+            properties: {
+              namespace: { type: "string", description: "Vault isolation scope" },
+              key: { type: "string", description: "Item key to delete" },
+              namespace_token: {
+                type: "string",
+                description: "One-time token issued when the namespace was claimed",
+              },
+            },
+            required: ["namespace", "key", "namespace_token"],
+          },
+          output: {
+            example: { status: "deleted", namespace: "my-app", key: "secret-1" },
+          },
+        }),
+      },
+
+      "/vault/exists": {
+        accepts: {
+          scheme: "exact",
+          network: BASE,
+          payTo: env.X402_PAY_TO,
+          price: "$0.001",
+        },
+        description:
+          "Check whether a key exists in the vault without returning its ciphertext (requires the namespace_token)",
+        extensions: declareDiscoveryExtension({
+          bodyType: "json",
+          inputSchema: {
+            type: "object",
+            properties: {
+              namespace: { type: "string", description: "Vault isolation scope" },
+              key: { type: "string", description: "Item key to test" },
+              namespace_token: {
+                type: "string",
+                description: "One-time token issued when the namespace was claimed",
+              },
+            },
+            required: ["namespace", "key", "namespace_token"],
+          },
+          output: {
+            example: { exists: true, namespace: "my-app", key: "secret-1" },
+          },
+        }),
+      },
+
       "/vault/retrieve": {
         accepts: {
           scheme: "exact",
@@ -433,8 +545,17 @@ export default {
     }
 
     // Public, no-signup facilitator supporting Base mainnet ("exact" scheme).
-    // No API key required — a drop-in replacement if you later switch to
-    // the CDP Facilitator (which additionally unlocks Bazaar auto-indexing).
+    //
+    // PayAI, not xpay.sh: xpay's /supported advertises `"extensions": []`, so
+    // it silently discards the Bazaar metadata this server attaches to every
+    // 402. Registering bazaarResourceServerExtension against xpay produced no
+    // discovery at all. PayAI advertises the `bazaar` extension and operates
+    // its own catalog at /discovery/resources, indexing on /verify as well as
+    // /settle — so a route can be listed before it has ever been paid.
+    //
+    // Free for the first 1,000 settlements, then $0.001 each. This is a
+    // separate catalog from Coinbase's CDP Bazaar, which still requires a
+    // payment settled through the CDP Facilitator and has no submission API.
     //
     // Built once per isolate rather than per request: constructing the
     // middleware eagerly calls facilitator.getSupported(), so rebuilding it
@@ -442,7 +563,7 @@ export default {
     // every inbound request, including free ones and 404s.
     if (!gatedApp) {
       const facilitatorClient = new HTTPFacilitatorClient({
-        url: env.FACILITATOR_URL ?? "https://facilitator.xpay.sh",
+        url: env.FACILITATOR_URL ?? "https://facilitator.payai.network",
       });
 
       // Pre-flight the facilitator. The x402 middleware loads supported

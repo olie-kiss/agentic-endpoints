@@ -156,6 +156,32 @@ describe("worker HTTP contract", () => {
     }
   });
 
+  /**
+   * Regression: /vault/store, /vault/delete and /vault/exists shipped with
+   * handlers registered but no entry in the x402 routes config, so they fell
+   * through the paid-path check and were served for free. Anyone could
+   * consume Durable Object storage at our expense.
+   */
+  it.each([
+    "/once-key",
+    "/scrape",
+    "/pdf-parse",
+    "/compress",
+    "/vault/store",
+    "/vault/retrieve",
+    "/vault/delete",
+    "/vault/exists",
+  ])("never serves %s without payment", async (path) => {
+    const res = await SELF.fetch(`https://ai.oliverkiss.com${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    // 402 normally; 503 when the test runner cannot reach the facilitator.
+    // Anything else means the route was reachable without paying.
+    expect([402, 503]).toContain(res.status);
+  });
+
   it("returns JSON, not HTML, for unknown routes", async () => {
     const res = await SELF.fetch("https://ai.oliverkiss.com/nope");
     expect(res.status).toBe(404);

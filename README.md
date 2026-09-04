@@ -88,6 +88,10 @@ npm run deploy
 # route answers 402 without a real on-chain payment.
 npm test
 npm run typecheck
+
+# Re-announce every route to the PayAI Bazaar. Signs a payment attempt with a
+# throwaway, never-funded key: verification fails on balance, nothing is spent.
+node scripts/trigger-indexing.mjs
 ```
 
 ## API Examples
