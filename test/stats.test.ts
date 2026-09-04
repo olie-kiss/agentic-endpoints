@@ -23,9 +23,15 @@ describe("how a request is counted", () => {
     expect(classify("/mcp", 200, false)?.outcome).toBe("free");
   });
 
-  it("counts non-payment failures as errors", () => {
-    expect(classify("/scrape", 400, true)?.outcome).toBe("error");
+  it("separates our failures from the caller's mistakes", () => {
+    // A bad request is the service correctly refusing. Counting it as an
+    // error would make the public status page understate reliability every
+    // time an agent sent the wrong shape.
+    expect(classify("/scrape", 400, true)?.outcome).toBe("client_error");
+    expect(classify("/once-key", 403, true)?.outcome).toBe("client_error");
+    expect(classify("/once-key", 404, true)?.outcome).toBe("client_error");
     expect(classify("/scrape", 500, true)?.outcome).toBe("error");
+    expect(classify("/scrape", 503, true)?.outcome).toBe("error");
   });
 
   it("ignores the owner checking on the service", () => {

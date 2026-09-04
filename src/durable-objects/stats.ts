@@ -173,7 +173,7 @@ export class Stats extends DurableObject<Env> {
     const hits = this.ctx.storage.sql
       .exec(
         `SELECT outcome, SUM(count) AS n FROM hits
-          WHERE day IN (?, ?) GROUP BY outcome`,
+          WHERE day IN (?, ?) AND path != 'other' GROUP BY outcome`,
         today,
         yesterday,
       )
@@ -181,6 +181,20 @@ export class Stats extends DurableObject<Env> {
 
     const requests = hits.reduce((a, h) => a + h.n, 0);
     const errors = hits.find((h) => h.outcome === "error")?.n ?? 0;
+    const rejected = hits.find((h) => h.outcome === "client_error")?.n ?? 0;
+
+    // Requests for paths that do not exist are almost entirely crawlers and
+    // scanners. Counting them against availability would let any stranger
+    // degrade the published figure at will.
+    const unknown = (
+      this.ctx.storage.sql
+        .exec(
+          `SELECT SUM(count) AS n FROM hits WHERE day IN (?, ?) AND path = 'other'`,
+          today,
+          yesterday,
+        )
+        .toArray() as unknown as { n: number | null }[]
+    )[0]?.n ?? 0;
 
     const buckets = this.ctx.storage.sql
       .exec(
@@ -196,8 +210,16 @@ export class Stats extends DurableObject<Env> {
       uptime_window: window,
       cron_ticks_24h: ticks.length,
       requests_48h: requests,
+      // Server failures only, over known paths. This is the number that says
+      // whether depending on the service is safe.
       error_rate_48h:
         requests > 0 ? `${((errors / requests) * 100).toFixed(2)}%` : null,
+      // Reported separately and deliberately not hidden: a high rate here
+      // usually means the documentation is unclear, which is our problem too,
+      // just a different one from being down.
+      rejected_rate_48h:
+        requests > 0 ? `${((rejected / requests) * 100).toFixed(2)}%` : null,
+      unknown_path_requests_48h: unknown,
       latency_ms: {
         // Named "at most" on purpose: a histogram bounds a percentile, it
         // does not measure one, and rounding that away invites a client to
@@ -208,7 +230,11 @@ export class Stats extends DurableObject<Env> {
       },
       measured_by:
         "Derived from this service's own request log and 5-minute cron ticks. " +
-        "A missed tick counts against uptime. Null means not enough data yet.",
+        "A missed tick counts against uptime. error_rate counts server " +
+        "failures only: a rejected token or an unclaimed key is the service " +
+        "working, and is reported under rejected_rate instead. Requests for " +
+        "paths that do not exist are excluded entirely. Null means not " +
+        "enough data yet.",
     };
   }
 
@@ -252,6 +278,7 @@ export class Stats extends DurableObject<Env> {
         challenged,
         paid,
         free: totals.free ?? 0,
+        client_error: totals.client_error ?? 0,
         error: totals.error ?? 0,
       },
       // The number this whole service turns on. Null rather than 0 when
@@ -271,7 +298,12 @@ export class Stats extends DurableObject<Env> {
   }
 }
 
-export type Outcome = "challenged" | "paid" | "free" | "error";
+export type Outcome =
+  | "challenged"
+  | "paid"
+  | "free"
+  | "client_error"
+  | "error";
 
 /** Cron fires every 5 minutes; see the schedule in wrangler.toml. */
 const CRON_PERIOD_MS = 5 * 60_000;
@@ -332,6 +364,8 @@ export interface Slo {
   cron_ticks_24h: number;
   requests_48h: number;
   error_rate_48h: string | null;
+  rejected_rate_48h: string | null;
+  unknown_path_requests_48h: number;
   latency_ms: {
     p50_at_most: number | null;
     p95_at_most: number | null;
@@ -346,6 +380,7 @@ export interface StatsSummary {
     challenged: number;
     paid: number;
     free: number;
+    client_error: number;
     error: number;
   };
   conversion: string | null;

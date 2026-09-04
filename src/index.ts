@@ -1122,11 +1122,17 @@ export function classify(
     outcome:
       status === 402
         ? "challenged"
-        : status >= 400
+        : // A rejected token or an unclaimed key is the service working, not
+          // failing. Folding those into one "error" count makes correct
+          // behaviour read as unreliability on the public status page, which
+          // is the opposite of what publishing it is for.
+          status >= 500
           ? "error"
-          : isPaid
-            ? "paid"
-            : "free",
+          : status >= 400
+            ? "client_error"
+            : isPaid
+              ? "paid"
+              : "free",
   };
 }
 
