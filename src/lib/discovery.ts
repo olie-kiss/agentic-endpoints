@@ -1,0 +1,231 @@
+import type { RoutesConfig } from "@x402/core/server";
+
+/**
+ * Machine-readable descriptions of this service, all derived from the payment
+ * config rather than written by hand.
+ *
+ * The intended customer here is a program, not a person. A program that has
+ * never been told about this service can only find it by reading something,
+ * and it will not read a landing page. So the same route table that decides
+ * what is charged also produces the OpenAPI document, the llms.txt summary
+ * and the crawler policy. A hand-kept copy of any of them would drift, and
+ * drift in this file means quoting a price the payment gate does not honour —
+ * which is exactly how three vault endpoints once shipped for free.
+ */
+
+interface Described {
+  path: string;
+  method: string;
+  price: string;
+  description: string;
+  inputSchema: Record<string, unknown> | undefined;
+  inputExample: unknown;
+  outputExample: unknown;
+}
+
+/**
+ * Pulls the human-facing parts back out of the x402 route config.
+ *
+ * The discovery extension nests the request schema inside a JSON Schema that
+ * describes the extension itself, so the useful part sits a few levels down.
+ * Reaching for it defensively: a missing branch should cost one field in the
+ * documentation, not throw and take out every discovery endpoint at once.
+ */
+export function describeRoutes(routes: RoutesConfig): Described[] {
+  return Object.entries(routes).map(([key, value]) => {
+    const config = value as Record<string, any>;
+    const match = /^([A-Z]+)\s+(.*)$/.exec(key);
+
+    const bazaar = config.extensions?.bazaar;
+    const info = bazaar?.info;
+
+    return {
+      path: match ? match[2] : key,
+      method: match ? match[1] : (info?.input?.method ?? "POST"),
+      price: config.accepts?.price ?? "unknown",
+      description: config.description ?? "",
+      inputSchema: bazaar?.schema?.properties?.input?.properties?.body,
+      inputExample: info?.input?.body,
+      outputExample: info?.output?.example,
+    };
+  });
+}
+
+/**
+ * An OpenAPI 3.1 document.
+ *
+ * Worth generating because it is the one description of an HTTP API that
+ * agent frameworks, SDK generators and tooling already parse without being
+ * taught anything specific to x402.
+ */
+export function buildOpenApi(routes: RoutesConfig, origin: string) {
+  const described = describeRoutes(routes);
+  const paths: Record<string, unknown> = {};
+
+  for (const route of described) {
+    paths[route.path] = {
+      [route.method.toLowerCase()]: {
+        summary: route.description,
+        description:
+          `${route.description}. Costs ${route.price}, paid per call with ` +
+          "x402 (USDC on Base), or debited from a prepaid balance by sending " +
+          "an X-Credit-Token header.",
+        operationId: route.path.replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_|_$/g, ""),
+        requestBody: route.inputSchema
+          ? {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: route.inputSchema,
+                  example: route.inputExample,
+                },
+              },
+            }
+          : undefined,
+        responses: {
+          "200": {
+            description: "Success",
+            content: {
+              "application/json": {
+                example: route.outputExample,
+              },
+            },
+          },
+          // Documented as a normal outcome rather than an error: for a paid
+          // API this is the expected first response to every new caller, and
+          // a client that treats it as a failure can never buy anything.
+          "402": {
+            description:
+              "Payment required. The `payment-required` response header " +
+              "carries a base64 x402 challenge naming the price, asset and " +
+              "recipient. Sign it and retry with an X-PAYMENT header.",
+          },
+          "429": { description: "Rate limited." },
+        },
+      },
+    };
+  }
+
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "agentic-endpoints",
+      version: "1.0.0",
+      description:
+        "Pay-per-call utilities for autonomous agents. No signup, no API " +
+        "keys, no invoices: every endpoint answers HTTP 402 with a price and " +
+        "serves the request once payment is signed.",
+    },
+    servers: [{ url: origin }],
+    paths,
+  };
+}
+
+/**
+ * llms.txt — a plain-markdown summary at a predictable path.
+ *
+ * Deliberately duplicates what OpenAPI already says, because the two are read
+ * by different things: a model given a URL and no tooling will do far better
+ * with prose than with a schema document.
+ */
+export function buildLlmsTxt(routes: RoutesConfig, origin: string): string {
+  const described = describeRoutes(routes);
+
+  const lines = [
+    "# agentic-endpoints",
+    "",
+    "> Pay-per-call HTTP utilities for autonomous AI agents. There is no",
+    "> signup, no API key and no invoice. Every paid endpoint answers 402",
+    "> with a price; you sign a stablecoin payment and retry.",
+    "",
+    "## How to pay",
+    "",
+    "Two options, and the same endpoints accept both:",
+    "",
+    "1. **Per call (x402).** Send the request. You get HTTP 402 with a",
+    "   `payment-required` header holding a base64 challenge that names the",
+    "   amount, the asset (USDC on Base, chain `eip155:8453`) and the",
+    "   recipient. Sign an EIP-3009 authorization and retry with an",
+    "   `X-PAYMENT` header. Any x402 client library does this for you.",
+    "2. **Prepaid credits.** POST to /credits/buy ($5 buys $6.00) or",
+    "   /credits/buy-25 ($25 buys $32.50). You get a token back once, and",
+    "   only once. Send it as `X-Credit-Token` on any paid endpoint and the",
+    "   list price is debited from your balance with no per-call signature.",
+    "",
+    "## Endpoints",
+    "",
+  ];
+
+  for (const route of described) {
+    lines.push(`### ${route.method} ${route.path} — ${route.price}`);
+    lines.push("");
+    lines.push(route.description);
+    lines.push("");
+    if (route.inputExample && Object.keys(route.inputExample as object).length) {
+      lines.push("Request:");
+      lines.push("```json");
+      lines.push(JSON.stringify(route.inputExample, null, 2));
+      lines.push("```");
+      lines.push("");
+    }
+  }
+
+  lines.push("## Free endpoints");
+  lines.push("");
+  lines.push(`- \`GET ${origin}/\` — this catalogue as JSON`);
+  lines.push(`- \`GET ${origin}/health\` — liveness`);
+  lines.push(`- \`GET ${origin}/stats\` — usage counts, published openly so you`);
+  lines.push("  can tell a maintained service from an abandoned one");
+  lines.push(`- \`GET ${origin}/openapi.json\` — OpenAPI 3.1 description`);
+  lines.push(`- \`POST ${origin}/credits/balance\` — check a credit balance`);
+  lines.push(`- \`${origin}/mcp\` — Model Context Protocol server (JSON-RPC)`);
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+/**
+ * robots.txt.
+ *
+ * Most sites publish this to keep crawlers out. The whole purpose of this one
+ * is the opposite: the customers are automated, so being read by a model is
+ * the point rather than the leak. Cloudflare serves a default file of pure
+ * boilerplate with no directives at all, which grants nothing explicitly, so
+ * this replaces it with a clear invitation and pointers to the two documents
+ * a machine would actually want.
+ */
+export function buildRobotsTxt(origin: string): string {
+  return [
+    "# Automated clients are the intended audience of this service, not an",
+    "# abuse of it. Crawl freely; the paid endpoints charge per call and are",
+    "# protected by payment rather than by obscurity.",
+    "",
+    "User-agent: *",
+    "Allow: /",
+    "",
+    "# Cloudflare's Content Signals Policy, answered explicitly rather than",
+    "# left blank.",
+    "Content-Signal: search=yes, ai-input=yes, ai-train=yes",
+    "",
+    `Sitemap: ${origin}/sitemap.xml`,
+    "",
+    "# Machine-readable descriptions of everything on offer:",
+    `#   ${origin}/llms.txt      prose summary`,
+    `#   ${origin}/openapi.json  OpenAPI 3.1`,
+    `#   ${origin}/             JSON catalogue with live prices`,
+    `#   ${origin}/mcp          Model Context Protocol endpoint`,
+    "",
+  ].join("\n");
+}
+
+/** A sitemap listing only the free, crawlable documents. */
+export function buildSitemap(origin: string): string {
+  const urls = ["/", "/llms.txt", "/openapi.json", "/stats", "/health"];
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ...urls.map((u) => `  <url><loc>${origin}${u}</loc></url>`),
+    "</urlset>",
+    "",
+  ].join("\n");
+}

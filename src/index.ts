@@ -21,6 +21,12 @@ import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
 import creditsHandler, { creditsStub } from "./handlers/credits";
 import { hashToken } from "./lib/utils";
+import {
+  buildLlmsTxt,
+  buildOpenApi,
+  buildRobotsTxt,
+  buildSitemap,
+} from "./lib/discovery";
 import type { Outcome, StatsSummary } from "./durable-objects/stats";
 import {
   alert,
@@ -154,6 +160,37 @@ app.get("/", (c) => {
 
 // ── Health check (free) ───────────────────────────────────────────
 app.get("/health", (c) => c.json({ status: "ok" }));
+
+/**
+ * Machine-readable descriptions of the service.
+ *
+ * The intended customer is a program that has never been told this service
+ * exists, and it will not read the landing page. All three documents are
+ * generated from the same route table that decides what is charged, so a
+ * price can never be advertised here that the payment gate does not honour.
+ */
+app.get("/openapi.json", (c) =>
+  c.json(buildOpenApi(buildRoutes(c.env), new URL(c.req.url).origin)),
+);
+
+app.get("/llms.txt", (c) =>
+  c.text(buildLlmsTxt(buildRoutes(c.env), new URL(c.req.url).origin)),
+);
+
+/**
+ * Replaces Cloudflare's default, which is boilerplate with no directives at
+ * all. Most sites publish this to keep crawlers out; here being read by a
+ * model is the entire point.
+ */
+app.get("/robots.txt", (c) =>
+  c.text(buildRobotsTxt(new URL(c.req.url).origin)),
+);
+
+app.get("/sitemap.xml", (c) =>
+  c.body(buildSitemap(new URL(c.req.url).origin), 200, {
+    "Content-Type": "application/xml; charset=utf-8",
+  }),
+);
 
 /**
  * One stable error shape for every failure, including malformed JSON and
@@ -1013,6 +1050,13 @@ const FREE_PATHS = new Set([
   "/revenue",
   "/stats",
   "/credits/balance",
+  // Counted individually rather than lumped into "other": a hit on one of
+  // these is a machine reading the documentation, which is the earliest
+  // visible sign that anything has discovered the service at all.
+  "/llms.txt",
+  "/openapi.json",
+  "/robots.txt",
+  "/sitemap.xml",
 ]);
 
 /**
