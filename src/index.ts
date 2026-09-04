@@ -275,6 +275,11 @@ function buildRoutes(env: Env): RoutesConfig {
       description: "Atomic idempotency witness",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: {
+          namespace: "invoices",
+          action_key: "charge-order-1042",
+          ttl: 86400,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -319,6 +324,7 @@ function buildRoutes(env: Env): RoutesConfig {
       description: "Web scraping and text extraction",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: { url: "https://example.com", format: "text" },
         inputSchema: {
           type: "object",
           properties: {
@@ -356,6 +362,7 @@ function buildRoutes(env: Env): RoutesConfig {
       description: "PDF text extraction",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: { url: "https://example.com/report.pdf" },
         inputSchema: {
           type: "object",
           properties: {
@@ -388,6 +395,11 @@ function buildRoutes(env: Env): RoutesConfig {
       description: "Token compression for LLMs",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: {
+          text: "Long input text to be compressed before it is sent to a model.",
+          target_tokens: 100,
+          strategy: "extractive",
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -426,6 +438,13 @@ function buildRoutes(env: Env): RoutesConfig {
         "Store an encrypted item in the vault. The first store claims the namespace and returns a one-time namespace_token.",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: {
+          namespace: "agent-secrets",
+          key: "openai-api-key",
+          ciphertext: "base64-of-your-client-side-encrypted-bytes",
+          alg: "AES-GCM",
+          ttl: 604800,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -480,6 +499,11 @@ function buildRoutes(env: Env): RoutesConfig {
         "Delete an item from the vault (requires the namespace_token)",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: {
+          namespace: "agent-secrets",
+          key: "openai-api-key",
+          namespace_token: "the token returned by your first store",
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -514,6 +538,7 @@ function buildRoutes(env: Env): RoutesConfig {
         "Buy $6.00 of prepaid credit for $5.00 (20% bonus). Returns a credit token; send it as X-Credit-Token on any paid endpoint to be debited at list price with no per-call payment signature.",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: {},
         inputSchema: { type: "object", properties: {} },
         output: {
           example: {
@@ -536,6 +561,7 @@ function buildRoutes(env: Env): RoutesConfig {
         "Buy $32.50 of prepaid credit for $25.00 (30% bonus). Returns a credit token; send it as X-Credit-Token on any paid endpoint to be debited at list price with no per-call payment signature.",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: {},
         inputSchema: { type: "object", properties: {} },
         output: {
           example: {
@@ -558,6 +584,11 @@ function buildRoutes(env: Env): RoutesConfig {
         "Check whether a key exists in the vault without returning its ciphertext (requires the namespace_token)",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: {
+          namespace: "agent-secrets",
+          key: "openai-api-key",
+          namespace_token: "the token returned by your first store",
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -587,6 +618,11 @@ function buildRoutes(env: Env): RoutesConfig {
         "Retrieve an encrypted item from the vault (requires the namespace_token issued at claim time)",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
+        input: {
+          namespace: "agent-secrets",
+          key: "openai-api-key",
+          namespace_token: "the token returned by your first store",
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -970,16 +1006,6 @@ async function handleScheduled(
 
 export default { fetch: withStats, scheduled: handleScheduled };
 
-/**
- * Known paths, so a stranger cannot grow the stats table by requesting random
- * URLs. Anything unrecognised is counted, but collapsed into one bucket.
- */
-function bucketPath(env: Env, path: string): string {
-  if (isKnownPaidPath(env, path)) return path;
-  if (FREE_PATHS.has(path)) return path;
-  return "other";
-}
-
 const FREE_PATHS = new Set([
   "/",
   "/health",
@@ -988,6 +1014,42 @@ const FREE_PATHS = new Set([
   "/stats",
   "/credits/balance",
 ]);
+
+/**
+ * Endpoints that exist to answer "is anyone using this". If looking at them
+ * counted as usage, they would always say yes.
+ */
+const OPERATOR_PATHS = new Set(["/stats", "/revenue", "/health"]);
+
+/**
+ * Decides how one request should be counted, or that it should not be.
+ *
+ * Kept pure and separate from the request path so it can be tested against
+ * every status and route directly. The recording itself is deliberately
+ * asynchronous, and a test that drove this through a real request could only
+ * ever assert on that race.
+ */
+export function classify(
+  path: string,
+  status: number,
+  isPaid: boolean,
+): { bucket: string; outcome: Outcome } | null {
+  if (OPERATOR_PATHS.has(path)) return null;
+
+  return {
+    // Unknown paths collapse into one bucket, so a stranger cannot grow the
+    // stats table without bound by requesting random URLs.
+    bucket: isPaid || FREE_PATHS.has(path) ? path : "other",
+    outcome:
+      status === 402
+        ? "challenged"
+        : status >= 400
+          ? "error"
+          : isPaid
+            ? "paid"
+            : "free",
+  };
+}
 
 function isKnownPaidPath(env: Env, path: string): boolean {
   return Object.keys(buildRoutes(env)).some(
@@ -1025,26 +1087,10 @@ async function withStats(
 
   try {
     const path = new URL(request.url).pathname;
-
-    // Operator endpoints are not demand. Counting them would mean every time
-    // the owner checked whether anyone was using the service, the answer got
-    // a little less true.
-    if (path === "/stats" || path === "/revenue" || path === "/health") {
-      return response;
+    const counted = classify(path, response.status, isKnownPaidPath(env, path));
+    if (counted) {
+      ctx.waitUntil(statsStub(env).record(counted.bucket, counted.outcome));
     }
-
-    const paid = isKnownPaidPath(env, path);
-
-    const outcome: Outcome =
-      response.status === 402
-        ? "challenged"
-        : response.status >= 400
-          ? "error"
-          : paid
-            ? "paid"
-            : "free";
-
-    ctx.waitUntil(statsStub(env).record(bucketPath(env, path), outcome));
   } catch (err) {
     console.error("Failed to record request stats:", err);
   }
