@@ -19,6 +19,8 @@ import webScraperHandler from "./handlers/web-scraper";
 import pdfParserHandler from "./handlers/pdf-parser";
 import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
+import creditsHandler, { creditsStub } from "./handlers/credits";
+import { hashToken } from "./lib/utils";
 import {
   alert,
   alertFailure,
@@ -33,6 +35,7 @@ import { landingPage } from "./pages/landing";
 // Re-export the Durable Object classes so wrangler can find them
 export { OnceKey } from "./durable-objects/once-key";
 export { Vault } from "./durable-objects/vault";
+export { Credits } from "./durable-objects/credits";
 
 const app = new Hono<{ Bindings: Env; Variables: { dispatch: Dispatcher } }>();
 
@@ -138,6 +141,25 @@ app.get("/", (c) => {
             "Remote MCP server (Streamable HTTP). tools/list is free; each tool re-enters the paid route above and returns its x402 payment demand until paid.",
         },
         {
+          path: "/credits/buy",
+          method: "POST",
+          price: "$5.00",
+          description:
+            "Buy $6.00 of prepaid credit (20% bonus). Returns a token to send as X-Credit-Token; no per-call payment signature needed.",
+        },
+        {
+          path: "/credits/buy-25",
+          method: "POST",
+          price: "$25.00",
+          description: "Buy $32.50 of prepaid credit (30% bonus).",
+        },
+        {
+          path: "/credits/balance",
+          method: "POST",
+          price: "free",
+          description: "Check a credit balance (requires X-Credit-Token)",
+        },
+        {
           path: "/revenue",
           method: "GET",
           price: "free",
@@ -195,6 +217,7 @@ app.route("/scrape", webScraperHandler);
 app.route("/pdf-parse", pdfParserHandler);
 app.route("/compress", tokenCompressorHandler);
 app.route("/vault", vaultHandler);
+app.route("/credits", creditsHandler);
 
 /**
  * Free: revenue is read from the chain, so publishing it costs nothing and
@@ -504,6 +527,55 @@ async function handleRequest(
         }),
       },
 
+      /**
+       * Prepaid packs. Priced above the per-call routes on purpose: this is
+       * the only place a buyer commits real money in one go, and the bonus is
+       * what makes committing rational for them.
+       */
+      "/credits/buy": {
+        accepts: {
+          scheme: "exact",
+          network: BASE,
+          payTo: env.X402_PAY_TO,
+          price: "$5.00",
+        },
+        description:
+          "Buy $6.00 of prepaid credit for $5.00 (20% bonus). Returns a credit token; send it as X-Credit-Token on any paid endpoint to be debited at list price with no per-call payment signature.",
+        extensions: declareDiscoveryExtension({
+          bodyType: "json",
+          inputSchema: { type: "object", properties: {} },
+          output: {
+            example: {
+              credit_token: "ae_...",
+              balance_usd: "6.000000",
+              paid: "$5.00",
+              bonus: "20%",
+            },
+          },
+        }),
+      },
+      "/credits/buy-25": {
+        accepts: {
+          scheme: "exact",
+          network: BASE,
+          payTo: env.X402_PAY_TO,
+          price: "$25.00",
+        },
+        description:
+          "Buy $32.50 of prepaid credit for $25.00 (30% bonus). Returns a credit token; send it as X-Credit-Token on any paid endpoint to be debited at list price with no per-call payment signature.",
+        extensions: declareDiscoveryExtension({
+          bodyType: "json",
+          inputSchema: { type: "object", properties: {} },
+          output: {
+            example: {
+              credit_token: "ae_...",
+              balance_usd: "32.500000",
+              paid: "$25.00",
+              bonus: "30%",
+            },
+          },
+        }),
+      },
       "/vault/exists": {
         accepts: {
           scheme: "exact",
@@ -624,6 +696,26 @@ async function handleRequest(
       return app.fetch(request, env, ctx);
     }
 
+    /**
+     * Prepaid credits, checked before the x402 gate.
+     *
+     * Requiring a signed payment on every request caps revenue at whatever a
+     * buyer will tolerate signing: $1,000 at $0.005 a call is 200,000
+     * signatures. A credit token lets the same work be sold once, in an
+     * amount worth the transaction.
+     */
+    const creditToken = request.headers.get("X-Credit-Token");
+    if (creditToken && path !== "/credits/buy" && path !== "/credits/buy-25") {
+      const priced = routes[path] ?? routes[`POST ${path}`];
+      const priceMicros = parsePriceMicros(
+        (priced as { accepts?: { price?: string } })?.accepts?.price,
+      );
+
+      if (priceMicros !== null) {
+        return spendCredits(request, env, ctx, creditToken, priceMicros);
+      }
+    }
+
     // Public, no-signup facilitator supporting Base mainnet ("exact" scheme).
     //
     // PayAI, not xpay.sh: xpay's /supported advertises `"extensions": []`, so
@@ -682,8 +774,124 @@ async function handleRequest(
       gatedApp = wrapper;
     }
 
-    return gatedApp.fetch(request, env, ctx);
+    const response = await gatedApp.fetch(request, env, ctx);
+
+    /**
+     * Advertise the prepaid option on the payment challenge — the one response
+     * every would-be buyer is guaranteed to see.
+     *
+     * Added as a header rather than injected into the challenge body: that
+     * body is what facilitators and strict x402 parsers consume, and it is
+     * what got these routes indexed. A non-standard field there could cost the
+     * only distribution channel currently working, which is not a trade worth
+     * making for a marketing line.
+     */
+    if (response.status === 402 && !path.startsWith("/credits/")) {
+      const headers = new Headers(response.headers);
+      headers.set(
+        "X-Credits-Available",
+        "Prepay to skip per-call signatures: $5 buys $6.00, $25 buys $32.50. POST /credits/buy",
+      );
+
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    }
+
+    return response;
   }
+}
+
+/**
+ * Converts an x402 price string to integer micro-dollars.
+ *
+ * The route config is the single source of truth for pricing, so credits are
+ * debited at exactly the advertised price and the two can never disagree.
+ * Parsed digit-wise rather than via parseFloat: $0.001 has no exact binary
+ * representation, and a ledger that drifts by rounding is not a ledger.
+ */
+function parsePriceMicros(price: string | undefined): number | null {
+  if (!price) return null;
+
+  const match = /^\$(\d+)(?:\.(\d{1,6}))?$/.exec(price.trim());
+  if (!match) return null;
+
+  const whole = Number(match[1]);
+  const frac = Number((match[2] ?? "").padEnd(6, "0"));
+  return whole * 1_000_000 + frac;
+}
+
+/**
+ * Serves a paid route from a prepaid balance instead of an on-chain payment.
+ *
+ * Debits before the work and refunds if the work fails, so an outage cannot
+ * bill a customer for nothing. Charging after success instead would let a
+ * caller run unlimited concurrent requests against a balance that has not yet
+ * been reduced.
+ */
+async function spendCredits(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  token: string,
+  priceMicros: number,
+): Promise<Response> {
+  const tokenHash = await hashToken(token);
+  const account = creditsStub(env, tokenHash);
+  const result = await account.spend(tokenHash, priceMicros);
+
+  if (!result.ok) {
+    if (result.reason === "unknown") {
+      return Response.json(
+        {
+          error: "invalid_credit_token",
+          detail:
+            "No such credit account. Buy credits at POST /credits/buy, or omit X-Credit-Token to pay per call with x402.",
+        },
+        { status: 401 },
+      );
+    }
+
+    return Response.json(
+      {
+        error: "insufficient_credit",
+        detail: "Credit balance too low for this call. Top up at POST /credits/buy.",
+        balance_usd: result.ledger?.balance_usd ?? "0.000000",
+        required_usd: (priceMicros / 1_000_000).toFixed(6),
+        top_up: "https://ai.oliverkiss.com/credits/buy",
+      },
+      { status: 402 },
+    );
+  }
+
+  let response: Response;
+  try {
+    response = await app.fetch(request, env, ctx);
+  } catch (err) {
+    console.error("Credit-funded request threw, refunding:", err);
+    ctx.waitUntil(account.refund(tokenHash, priceMicros));
+    throw err;
+  }
+
+  // A 5xx is our failure, so the customer keeps their credit. A 4xx is theirs
+  // and stays billed: validation still consumed the request, and refunding it
+  // would make malformed input a free way to probe the service.
+  if (response.status >= 500) {
+    ctx.waitUntil(account.refund(tokenHash, priceMicros));
+    return response;
+  }
+
+  const headers = new Headers(response.headers);
+  headers.set("X-Credit-Balance", result.ledger.balance_usd);
+  headers.set("X-Credit-Charged", (priceMicros / 1_000_000).toFixed(6));
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 /**

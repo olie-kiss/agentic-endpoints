@@ -48,6 +48,15 @@ export interface MonitorState {
   recent: Payment[];
 
   /**
+   * Last observed USDC balance, in base units, as a decimal string.
+   *
+   * This, not the log scan, is the source of truth for revenue: balanceOf is a
+   * cheap eth_call that every public node answers, whereas eth_getLogs is
+   * refused outright by all of them from Cloudflare egress IPs.
+   */
+  lastBalance: string | null;
+
+  /**
    * Health of the monitor itself. Without this, a scan that has been failing
    * for a week is indistinguishable from a week with no sales: both report
    * zero. The whole point of the monitor is to tell those apart.
@@ -65,6 +74,7 @@ export const EMPTY_STATE: MonitorState = {
   firstPaymentAt: null,
   lastPaymentAt: null,
   recent: [],
+  lastBalance: null,
   lastRunAt: null,
   lastSuccessAt: null,
   lastError: null,
@@ -157,6 +167,25 @@ export function formatUsdc(raw: bigint): number {
   return Number(`${whole}.${frac.toString().padStart(USDC_DECIMALS, "0")}`);
 }
 
+/** ERC-20 balanceOf(address) selector. */
+const BALANCE_OF = "0x70a08231";
+
+/**
+ * Reads the receiving address's USDC balance.
+ *
+ * eth_call is cheap and universally served, which matters more than elegance
+ * here: the log-based approach was strictly better data but could not actually
+ * be executed, and a monitor that cannot run reports nothing at all.
+ */
+async function fetchBalance(env: Env): Promise<bigint> {
+  const data = `${BALANCE_OF}${env.X402_PAY_TO.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
+  const raw = await rpc<string>(env, "eth_call", [
+    { to: USDC_BASE, data },
+    "latest",
+  ]);
+  return BigInt(raw);
+}
+
 export async function readState(env: Env): Promise<MonitorState> {
   const stored = await env.MONITOR.get<MonitorState>(STATE_KEY, "json");
   return stored ? { ...EMPTY_STATE, ...stored } : { ...EMPTY_STATE };
@@ -206,16 +235,20 @@ export async function scanForPayments(env: Env): Promise<{
   newPayments: Payment[];
 }> {
   const state = await readState(env);
+  const now = new Date().toISOString();
+
   const head = Number(await rpc<string>(env, "eth_blockNumber", []));
+  const balance = await fetchBalance(env);
 
-  const now0 = new Date().toISOString();
-
-  if (state.lastBlock === 0) {
+  // First run establishes both watermarks and claims nothing. Treating the
+  // opening balance as revenue would invent a payment that never happened.
+  if (state.lastBalance === null) {
     const initial: MonitorState = {
       ...state,
       lastBlock: head,
-      lastRunAt: now0,
-      lastSuccessAt: now0,
+      lastBalance: balance.toString(),
+      lastRunAt: now,
+      lastSuccessAt: now,
       lastError: null,
       consecutiveFailures: 0,
     };
@@ -223,11 +256,19 @@ export async function scanForPayments(env: Env): Promise<{
     return { state: initial, newPayments: [] };
   }
 
-  if (head <= state.lastBlock) {
+  const previous = BigInt(state.lastBalance);
+  const delta = balance - previous;
+
+  // A negative delta is a withdrawal, not negative revenue. Lifetime received
+  // only ever accumulates positive movements, so moving funds out of the
+  // wallet must not erase the record of having earned them.
+  if (delta <= 0n) {
     const idle: MonitorState = {
       ...state,
-      lastRunAt: now0,
-      lastSuccessAt: now0,
+      lastBlock: head,
+      lastBalance: balance.toString(),
+      lastRunAt: now,
+      lastSuccessAt: now,
       lastError: null,
       consecutiveFailures: 0,
     };
@@ -235,40 +276,17 @@ export async function scanForPayments(env: Env): Promise<{
     return { state: idle, newPayments: [] };
   }
 
-  const fromBlock = state.lastBlock + 1;
-  const toBlock = Math.min(head, state.lastBlock + MAX_BLOCK_RANGE);
+  // Money arrived. Try to attribute it to specific transfers, but never let
+  // that decide whether the payment is recorded.
+  const newPayments = await describeTransfers(env, state.lastBlock, head, delta);
 
-  const logs = await rpc<
-    Array<{ topics: string[]; data: string; blockNumber: string; transactionHash: string }>
-  >(env, "eth_getLogs", [
-    {
-      address: USDC_BASE,
-      topics: [TRANSFER_TOPIC, null, addressTopic(env.X402_PAY_TO)],
-      fromBlock: `0x${fromBlock.toString(16)}`,
-      toBlock: `0x${toBlock.toString(16)}`,
-    },
-  ]);
-
-  const newPayments: Payment[] = logs.map((log) => {
-    const raw = BigInt(log.data);
-    return {
-      from: topicToAddress(log.topics[1]),
-      amount: raw.toString(),
-      usdc: formatUsdc(raw),
-      block: Number(log.blockNumber),
-      tx: log.transactionHash,
-    };
-  });
-
-  const now = new Date().toISOString();
   const next: MonitorState = {
-    lastBlock: toBlock,
-    totalUsdc:
-      Math.round((state.totalUsdc + newPayments.reduce((a, p) => a + p.usdc, 0)) * 1e6) / 1e6,
+    lastBlock: head,
+    lastBalance: balance.toString(),
+    totalUsdc: Math.round((state.totalUsdc + formatUsdc(delta)) * 1e6) / 1e6,
     paymentCount: state.paymentCount + newPayments.length,
-    firstPaymentAt:
-      state.firstPaymentAt ?? (newPayments.length > 0 ? now : null),
-    lastPaymentAt: newPayments.length > 0 ? now : state.lastPaymentAt,
+    firstPaymentAt: state.firstPaymentAt ?? now,
+    lastPaymentAt: now,
     recent: [...newPayments, ...state.recent].slice(0, 20),
     lastRunAt: now,
     lastSuccessAt: now,
@@ -277,8 +295,68 @@ export async function scanForPayments(env: Env): Promise<{
   };
 
   await writeState(env, next);
-
   return { state: next, newPayments };
+}
+
+/**
+ * Best-effort attribution of a balance increase to individual transfers.
+ *
+ * Public nodes refuse eth_getLogs from Worker IPs, so this is expected to fail
+ * and must never be load-bearing: on failure the balance delta is still
+ * reported as one payment of unknown origin. Set BASE_RPC_URL to a node that
+ * serves logs (Alchemy, Infura, QuickNode free tiers) to get per-payer detail.
+ */
+async function describeTransfers(
+  env: Env,
+  fromBlockExclusive: number,
+  head: number,
+  delta: bigint,
+): Promise<Payment[]> {
+  const fallback: Payment[] = [
+    {
+      from: "unknown",
+      amount: delta.toString(),
+      usdc: formatUsdc(delta),
+      block: head,
+      tx: "",
+    },
+  ];
+
+  const fromBlock = Math.max(fromBlockExclusive + 1, head - MAX_BLOCK_RANGE);
+  if (fromBlock > head) return fallback;
+
+  try {
+    const logs = await rpc<
+      Array<{ topics: string[]; data: string; blockNumber: string; transactionHash: string }>
+    >(env, "eth_getLogs", [
+      {
+        address: USDC_BASE,
+        topics: [TRANSFER_TOPIC, null, addressTopic(env.X402_PAY_TO)],
+        fromBlock: `0x${fromBlock.toString(16)}`,
+        toBlock: `0x${head.toString(16)}`,
+      },
+    ]);
+
+    const payments = logs.map((log) => {
+      const raw = BigInt(log.data);
+      return {
+        from: topicToAddress(log.topics[1]),
+        amount: raw.toString(),
+        usdc: formatUsdc(raw),
+        block: Number(log.blockNumber),
+        tx: log.transactionHash,
+      };
+    });
+
+    // Only trust the attribution if it actually accounts for the money. A
+    // partial match means the window missed transfers, and reporting those as
+    // the whole story would understate what arrived.
+    const sum = payments.reduce((a, p) => a + BigInt(p.amount), 0n);
+    return sum === delta && payments.length > 0 ? payments : fallback;
+  } catch (err) {
+    console.warn("Transfer attribution unavailable, recording aggregate:", err);
+    return fallback;
+  }
 }
 
 /**

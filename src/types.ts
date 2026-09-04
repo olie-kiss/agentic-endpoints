@@ -2,6 +2,7 @@ export interface Env {
   // Durable Objects
   ONCE_KEY: DurableObjectNamespace;
   VAULT: DurableObjectNamespace;
+  CREDITS: DurableObjectNamespace;
 
   // Revenue watermark + rolling payment history
   MONITOR: KVNamespace;

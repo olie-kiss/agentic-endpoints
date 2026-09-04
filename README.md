@@ -16,6 +16,9 @@ Live at **https://ai.oliverkiss.com**
 | `/vault/retrieve` | POST | $0.02 | Retrieve a client-encrypted item |
 | `/vault/delete` | POST | $0.005 | Delete an item |
 | `/vault/exists` | POST | $0.001 | Check whether an item exists |
+| `/credits/buy` | POST | $5.00 | Buy $6.00 of prepaid credit (20% bonus) |
+| `/credits/buy-25` | POST | $25.00 | Buy $32.50 of prepaid credit (30% bonus) |
+| `/credits/balance` | POST | Free | Check a credit balance |
 | `/revenue` | GET | Free | On-chain USDC received, read from Base |
 | `/mcp` | POST | Free to list | Remote MCP server; each tool costs its route's price |
 | `/` | GET | Free | Service discovery (JSON) or landing page (HTML) |
@@ -59,6 +62,37 @@ re-enters the corresponding paid route in-process, so it passes the same x402
 gate, body cap and validation as a direct HTTP call. Without a valid
 `X-PAYMENT` header the tool returns `isError: true` and a machine-readable
 payment demand (price, `payTo`, asset, network) rather than performing work.
+
+## Two Ways To Pay
+
+Per-call x402 caps revenue at whatever a buyer will tolerate signing: $1,000 at
+$0.005 a call is 200,000 signatures. Prepaid credits sell the same work once,
+in an amount worth the transaction, and let callers whose wallets cannot sign
+per request use the service at all.
+
+Both paths run side by side and neither is privileged:
+
+```bash
+# Per call, unchanged
+curl -X POST https://ai.oliverkiss.com/compress -H "X-PAYMENT: ..." -d '{"text":"..."}'
+
+# Or prepay once, then no signatures
+curl -X POST https://ai.oliverkiss.com/credits/buy -H "X-PAYMENT: ..."   # -> credit_token
+curl -X POST https://ai.oliverkiss.com/compress \
+  -H "X-Credit-Token: ae_..." -d '{"text":"..."}'
+```
+
+Omitting `X-Credit-Token` produces exactly the 402 challenge it always did, so
+the Bazaar listing and every existing integration are unaffected.
+
+Credits are integer micro-dollars, never floats: $0.001 has no exact binary
+representation, and a ledger that drifts is worse than no ledger. Each account
+is its own Durable Object addressed by the hash of its token, so the balance
+check and its debit are atomic and one account cannot queue behind another.
+Calls are debited before the work and refunded if it 5xxs, because an outage
+must not bill a customer for nothing.
+
+**The token is shown once and is not recoverable** — only its hash is stored.
 
 ## Discovery
 

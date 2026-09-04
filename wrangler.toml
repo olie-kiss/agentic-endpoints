@@ -62,6 +62,13 @@ class_name = "OnceKey"
 name = "VAULT"
 class_name = "Vault"
 
+# One Durable Object per credit account, addressed by the token hash, so a
+# balance check and its debit are atomic and accounts never queue behind
+# each other.
+[[durable_objects.bindings]]
+name = "CREDITS"
+class_name = "Credits"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["OnceKey"]
@@ -69,6 +76,10 @@ new_sqlite_classes = ["OnceKey"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Vault"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["Credits"]
 
 # ── Rate Limiting ──────────────────────────────────────────────────
 # Per-Cloudflare-location limits. Free endpoints are the abuse surface,
