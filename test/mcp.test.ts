@@ -109,13 +109,17 @@ describe("MCP tools", () => {
     expect(status).toBe(200);
     expect(json.result.resultType).toBe("complete");
     expect(json.result.cacheScope).toBe("public");
-    expect(json.result.tools.length).toBe(8);
+    expect(json.result.tools.length).toBe(10);
   });
 
-  it("advertises a price on every tool", async () => {
+  it("states a price on every tool, including the free ones", async () => {
     const { json } = await rpc("tools/list");
     for (const tool of json.result.tools) {
-      expect(tool.description, tool.name).toMatch(/Costs \$\d/);
+      // Silence is the dangerous case: a tool whose cost is unstated is one
+      // an agent must either avoid or pay for blind.
+      expect(tool.description, tool.name).toMatch(
+        /Costs \$\d|This tool is free; no payment is required\./,
+      );
       expect(tool.inputSchema.type).toBe("object");
     }
   });

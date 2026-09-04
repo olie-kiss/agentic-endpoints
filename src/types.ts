@@ -39,14 +39,29 @@ export interface ClaimRequest {
   action_key: string;
   payload_sha256?: string;
   ttl?: number; // seconds, default 86400 (24h)
+  /** How long the claimant has to complete before the key is reclaimable. */
+  lease_ttl?: number; // seconds, default 300 (5m)
 }
 
 export interface ClaimResult {
-  status: "claimed" | "duplicate" | "conflict";
+  status:
+    | "claimed"
+    | "duplicate"
+    | "conflict"
+    | "in_progress"
+    | "completed"
+    | "already_completed"
+    | "released";
   namespace: string;
   action_key: string;
   claimed_at: string;
   expires_at: string;
+  /** Present once the action has been completed; replayed to later claims. */
+  result?: unknown;
+  /** Present while a claim is live. */
+  lease_expires_at?: string;
+  /** True when a lapsed lease was taken over from a previous claimant. */
+  recovered?: boolean;
   receipt: string;
 }
 

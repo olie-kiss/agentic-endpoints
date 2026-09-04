@@ -11,6 +11,24 @@ import {
 const DEFAULT_TTL_SECONDS = 86400;
 
 /**
+ * A lease is opt-in via `lease_ttl`.
+ *
+ * The default has to be the safe one. If leases were on by default, an agent
+ * that simply never calls /complete — every integration written against the
+ * original claim-only API — would have its key silently become reclaimable,
+ * and a second agent would run the same side effect. Duplicating a charge or
+ * an email is the precise failure this service is sold to prevent, and it is
+ * far worse than the alternative: a key that stays held until its ttl and
+ * needs a fresh action_key to retry.
+ */
+const RECOMMENDED_LEASE_SECONDS = 300;
+
+/** Cap on a stored result, to keep one namespace from filling DO storage. */
+export const MAX_RESULT_BYTES = 16 * 1024;
+
+type Action = "claim" | "complete" | "release";
+
+/**
  * OnceKey — Atomic idempotency witness backed by Durable Object SQLite.
  *
  * Each unique {namespace} gets its own Durable Object instance.
@@ -21,9 +39,32 @@ const DEFAULT_TTL_SECONDS = 86400;
  * this, namespaces are just guessable strings: anyone could pre-burn another
  * tenant's action_keys for $0.001 each, causing the victim's own writes to
  * come back as "duplicate" and be silently skipped.
+ *
+ * An action_key moves through two states:
+ *
+ *   claim ──▶ claimed ──▶ completed
+ *                │  ▲         │
+ *      release / │  │ another │ later claims replay the stored result
+ *   lease expiry │  │ caller  │ instead of re-running the side effect
+ *                ▼  │ takes   ▼
+ *              (gone)  over
+ *
+ * The lease is what makes this safe for real agents. A claimant that crashes
+ * mid-work would otherwise hold the key until its full ttl elapsed, blocking
+ * every retry. Instead the claim carries a short lease; once that lapses the
+ * work is presumed abandoned and the next caller may take it over.
  */
 export class OnceKey extends DurableObject<Env> {
   private initialized = false;
+
+  private columns(table: string): Set<string> {
+    return new Set(
+      this.ctx.storage.sql
+        .exec(`PRAGMA table_info(${table})`)
+        .toArray()
+        .map((r) => r.name as string),
+    );
+  }
 
   private ensureTable() {
     if (this.initialized) return;
@@ -42,6 +83,31 @@ export class OnceKey extends DurableObject<Env> {
         claimed_at   TEXT NOT NULL
       )
     `);
+
+    // Rows written before the lease model existed were terminal on creation:
+    // once claimed they could only ever read back as "duplicate". Defaulting
+    // them to 'completed' preserves exactly that behaviour, where defaulting
+    // to 'claimed' would silently make every historical key take-over-able.
+    const cols = this.columns("claims");
+    if (!cols.has("state")) {
+      this.ctx.storage.sql.exec(
+        `ALTER TABLE claims ADD COLUMN state TEXT NOT NULL DEFAULT 'completed'`,
+      );
+    }
+    if (!cols.has("result")) {
+      this.ctx.storage.sql.exec(`ALTER TABLE claims ADD COLUMN result TEXT`);
+    }
+    if (!cols.has("lease_expires_at")) {
+      this.ctx.storage.sql.exec(
+        `ALTER TABLE claims ADD COLUMN lease_expires_at TEXT`,
+      );
+    }
+    if (!cols.has("completed_at")) {
+      this.ctx.storage.sql.exec(
+        `ALTER TABLE claims ADD COLUMN completed_at TEXT`,
+      );
+    }
+
     this.initialized = true;
   }
 
@@ -71,16 +137,47 @@ export class OnceKey extends DurableObject<Env> {
     return timingSafeEqual(await hashToken(token), ownerHash);
   }
 
+  private row(actionKey: string): Record<string, unknown> | null {
+    const rows = this.ctx.storage.sql
+      .exec(`SELECT * FROM claims WHERE action_key = ?`, actionKey)
+      .toArray();
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  /** Drop claims whose absolute lifetime has elapsed. */
+  private purge(nowIso: string) {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM claims WHERE expires_at < ?`,
+      nowIso,
+    );
+  }
+
+  private static parseResult(raw: unknown): unknown {
+    if (typeof raw !== "string") return undefined;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+  }
+
   async fetch(request: Request): Promise<Response> {
     if (request.method !== "POST") {
       return Response.json({ error: "POST required" }, { status: 405 });
     }
+
+    const action = new URL(request.url).pathname.replace(
+      /^\//,
+      "",
+    ) as Action;
 
     const body = await request.json<{
       action_key: string;
       payload_sha256?: string;
       namespace_token?: string;
       ttl?: number;
+      lease_ttl?: number;
+      result?: unknown;
     }>();
 
     if (!body.action_key) {
@@ -93,6 +190,13 @@ export class OnceKey extends DurableObject<Env> {
     const ttl = normalizeTtl(body.ttl);
     if (!ttl.ok) {
       return Response.json({ error: ttl.error }, { status: 400 });
+    }
+    const leaseTtl = normalizeTtl(body.lease_ttl);
+    if (!leaseTtl.ok) {
+      return Response.json(
+        { error: leaseTtl.error?.replace("ttl", "lease_ttl") },
+        { status: 400 },
+      );
     }
 
     this.ensureTable();
@@ -134,17 +238,6 @@ export class OnceKey extends DurableObject<Env> {
       }
     }
 
-    // Purge expired claims
-    this.ctx.storage.sql.exec(
-      `DELETE FROM claims WHERE expires_at < ?`,
-      new Date().toISOString(),
-    );
-
-    const now = new Date();
-    const expiresAt = new Date(
-      now.getTime() + (ttl.value ?? DEFAULT_TTL_SECONDS) * 1000,
-    );
-
     const ownership = issuedToken
       ? {
           namespace_token: issuedToken,
@@ -152,15 +245,52 @@ export class OnceKey extends DurableObject<Env> {
         }
       : {};
 
-    // Attempt atomic claim
-    const existing = this.ctx.storage.sql
-      .exec(`SELECT * FROM claims WHERE action_key = ?`, body.action_key)
-      .toArray();
+    const now = new Date();
+    this.purge(now.toISOString());
 
-    if (existing.length > 0) {
-      const row = existing[0];
-      // Check payload mismatch → conflict
-      if (body.payload_sha256 && row.payload_sha !== body.payload_sha256) {
+    switch (action) {
+      case "complete":
+        return this.handleComplete(body, now, ttl.value, ownership);
+      case "release":
+        return this.handleRelease(body, ownership);
+      default:
+        return this.handleClaim(body, now, ttl.value, leaseTtl.value, ownership);
+    }
+  }
+
+  private handleClaim(
+    body: {
+      action_key: string;
+      payload_sha256?: string;
+    },
+    now: Date,
+    ttlValue: number | null | undefined,
+    leaseValue: number | null | undefined,
+    ownership: Record<string, unknown>,
+  ): Response {
+    const ttlSeconds = ttlValue ?? DEFAULT_TTL_SECONDS;
+    // A lease outliving the claim itself could never fire, so the claim
+    // would be unrecoverable for exactly the cases the lease exists for.
+    // No lease_ttl means no lease: the claim is terminal until its ttl.
+    const leaseSeconds =
+      leaseValue == null ? null : Math.min(leaseValue, ttlSeconds);
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+    const leaseExpiresAt =
+      leaseSeconds === null
+        ? null
+        : new Date(now.getTime() + leaseSeconds * 1000);
+
+    const existing = this.row(body.action_key);
+
+    if (existing) {
+      // A different payload under the same action_key means the caller has a
+      // key-derivation bug; replaying a result computed from other inputs
+      // would be worse than refusing.
+      if (
+        body.payload_sha256 &&
+        existing.payload_sha &&
+        existing.payload_sha !== body.payload_sha256
+      ) {
         // Deliberately HTTP 200 with status: "conflict", not 409. The x402
         // middleware cancels payment settlement on any status >= 400, so a
         // 409 here would let the caller replay the same payment header
@@ -168,35 +298,205 @@ export class OnceKey extends DurableObject<Env> {
         return Response.json({
           status: "conflict",
           action_key: body.action_key,
-          claimed_at: row.claimed_at,
-          expires_at: row.expires_at,
+          claimed_at: existing.claimed_at,
+          expires_at: existing.expires_at,
           ...ownership,
         });
       }
+
+      if (existing.state === "completed") {
+        return Response.json({
+          status: "duplicate",
+          action_key: body.action_key,
+          claimed_at: existing.claimed_at,
+          completed_at: existing.completed_at ?? null,
+          expires_at: existing.expires_at,
+          result: OnceKey.parseResult(existing.result),
+          ...ownership,
+        });
+      }
+
+      // An unleased claim is terminal until its ttl: there is no basis on
+      // which to decide the original claimant is gone, so it stays held.
+      const leaseExp = existing.lease_expires_at as string | null;
+      if (!leaseExp) {
+        return Response.json({
+          status: "duplicate",
+          action_key: body.action_key,
+          claimed_at: existing.claimed_at,
+          expires_at: existing.expires_at,
+          ...ownership,
+        });
+      }
+
+      // Still held by a live claimant: report it rather than allowing a
+      // second agent to start the same side effect concurrently.
+      if (leaseExp > now.toISOString()) {
+        return Response.json({
+          status: "in_progress",
+          action_key: body.action_key,
+          claimed_at: existing.claimed_at,
+          lease_expires_at: leaseExp,
+          retry_after: Math.max(
+            1,
+            Math.ceil((Date.parse(leaseExp) - now.getTime()) / 1000),
+          ),
+          ...ownership,
+        });
+      }
+
+      // Lease lapsed — the previous claimant is presumed dead. Take it over,
+      // preserving the original absolute expiry so a crash loop cannot
+      // extend an action_key's lifetime indefinitely.
+      this.ctx.storage.sql.exec(
+        `UPDATE claims SET claimed_at = ?, lease_expires_at = ?, payload_sha = ?
+         WHERE action_key = ?`,
+        now.toISOString(),
+        leaseExpiresAt ? leaseExpiresAt.toISOString() : null,
+        body.payload_sha256 ?? existing.payload_sha ?? null,
+        body.action_key,
+      );
+
       return Response.json({
-        status: "duplicate",
+        status: "claimed",
+        recovered: true,
         action_key: body.action_key,
-        claimed_at: row.claimed_at,
-        expires_at: row.expires_at,
+        claimed_at: now.toISOString(),
+        ...(leaseExpiresAt
+          ? { lease_expires_at: leaseExpiresAt.toISOString() }
+          : {}),
+        expires_at: existing.expires_at,
         ...ownership,
       });
     }
 
-    // Claim it
     this.ctx.storage.sql.exec(
-      `INSERT INTO claims (action_key, payload_sha, claimed_at, expires_at)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO claims
+         (action_key, payload_sha, claimed_at, expires_at, state, lease_expires_at)
+       VALUES (?, ?, ?, ?, 'claimed', ?)`,
       body.action_key,
       body.payload_sha256 ?? null,
       now.toISOString(),
       expiresAt.toISOString(),
+      leaseExpiresAt ? leaseExpiresAt.toISOString() : null,
     );
 
     return Response.json({
       status: "claimed",
       action_key: body.action_key,
       claimed_at: now.toISOString(),
+      ...(leaseExpiresAt
+        ? { lease_expires_at: leaseExpiresAt.toISOString() }
+        : {}),
       expires_at: expiresAt.toISOString(),
+      ...ownership,
+    });
+  }
+
+  private handleComplete(
+    body: { action_key: string; result?: unknown },
+    now: Date,
+    ttlValue: number | null | undefined,
+    ownership: Record<string, unknown>,
+  ): Response {
+    const existing = this.row(body.action_key);
+    if (!existing) {
+      return Response.json(
+        {
+          error:
+            "No live claim for this action_key. It was never claimed, was released, or its ttl elapsed.",
+        },
+        { status: 404 },
+      );
+    }
+
+    // Completing twice is not an error — a retry that lost the response to a
+    // network failure must be able to converge on the same answer.
+    if (existing.state === "completed") {
+      return Response.json({
+        status: "already_completed",
+        action_key: body.action_key,
+        completed_at: existing.completed_at ?? null,
+        expires_at: existing.expires_at,
+        result: OnceKey.parseResult(existing.result),
+        ...ownership,
+      });
+    }
+
+    const serialized =
+      body.result === undefined ? null : JSON.stringify(body.result);
+    if (serialized !== null && serialized.length > MAX_RESULT_BYTES) {
+      return Response.json(
+        {
+          error: `result exceeds the ${MAX_RESULT_BYTES} byte limit`,
+          detail:
+            "Store the payload elsewhere and record a reference to it instead.",
+        },
+        { status: 413 },
+      );
+    }
+
+    // Completion restarts the retention clock: the value of a stored result
+    // begins when it exists, not when the work started.
+    const expiresAt = new Date(
+      now.getTime() + (ttlValue ?? DEFAULT_TTL_SECONDS) * 1000,
+    );
+
+    this.ctx.storage.sql.exec(
+      `UPDATE claims
+         SET state = 'completed', result = ?, completed_at = ?,
+             lease_expires_at = NULL, expires_at = ?
+       WHERE action_key = ?`,
+      serialized,
+      now.toISOString(),
+      expiresAt.toISOString(),
+      body.action_key,
+    );
+
+    return Response.json({
+      status: "completed",
+      action_key: body.action_key,
+      completed_at: now.toISOString(),
+      expires_at: expiresAt.toISOString(),
+      result: OnceKey.parseResult(serialized),
+      ...ownership,
+    });
+  }
+
+  private handleRelease(
+    body: { action_key: string },
+    ownership: Record<string, unknown>,
+  ): Response {
+    const existing = this.row(body.action_key);
+    if (!existing) {
+      return Response.json(
+        { error: "No live claim for this action_key." },
+        { status: 404 },
+      );
+    }
+
+    // Releasing a completed key would discard the recorded result and let the
+    // side effect run a second time — the exact outcome this service sells
+    // protection against.
+    if (existing.state === "completed") {
+      return Response.json(
+        {
+          error: "Cannot release a completed action_key.",
+          detail:
+            "Completion is final. Use a new action_key to perform the work again.",
+        },
+        { status: 409 },
+      );
+    }
+
+    this.ctx.storage.sql.exec(
+      `DELETE FROM claims WHERE action_key = ?`,
+      body.action_key,
+    );
+
+    return Response.json({
+      status: "released",
+      action_key: body.action_key,
       ...ownership,
     });
   }

@@ -309,13 +309,16 @@ function buildRoutes(env: Env): RoutesConfig {
         payTo: env.X402_PAY_TO,
         price: "$0.001",
       },
-      description: "Atomic idempotency witness",
+      description:
+        "Atomic idempotency witness — claim an action exactly once, record " +
+        "its result, and replay that result to every later caller",
       extensions: declareDiscoveryExtension({
         bodyType: "json",
         input: {
           namespace: "invoices",
           action_key: "charge-order-1042",
           ttl: 86400,
+          lease_ttl: 300,
         },
         inputSchema: {
           type: "object",
@@ -336,6 +339,19 @@ function buildRoutes(env: Env): RoutesConfig {
               type: "number",
               description: "Claim lifetime in seconds (default 86400)",
             },
+            namespace_token: {
+              type: "string",
+              description:
+                "Owner token issued on the first claim in a namespace; " +
+                "required on every later request",
+            },
+            lease_ttl: {
+              type: "number",
+              description:
+                "Seconds you have to call /once-key/complete before the " +
+                "claim is treated as abandoned and another caller may take " +
+                "it over. Omit to hold the claim for its full ttl.",
+            },
           },
           required: ["namespace", "action_key"],
         },
@@ -345,6 +361,7 @@ function buildRoutes(env: Env): RoutesConfig {
             namespace: "my-app",
             action_key: "order-12345",
             claimed_at: "2026-01-01T00:00:00.000Z",
+            lease_expires_at: "2026-01-01T00:05:00.000Z",
             expires_at: "2026-01-02T00:00:00.000Z",
             receipt: "abc123...",
           },

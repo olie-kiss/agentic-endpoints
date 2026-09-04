@@ -58,6 +58,74 @@ export function describeRoutes(routes: RoutesConfig): Described[] {
  * agent frameworks, SDK generators and tooling already parse without being
  * taught anything specific to x402.
  */
+/**
+ * Free POST endpoints that are part of a paid endpoint's lifecycle.
+ *
+ * These are not in `routes`, because `routes` is the x402 pricing table and
+ * these cost nothing. But an agent that cannot discover /once-key/complete
+ * will never call it, and every key it claims will dangle with no recorded
+ * result — so they have to appear in the generated documents alongside the
+ * paid routes rather than being mentioned only in prose.
+ */
+export const FREE_POST_ENDPOINTS = [
+  {
+    path: "/once-key/complete",
+    summary: "Record the outcome of a claimed action_key",
+    description:
+      "Stores the result of work performed under a claim. Later claims of " +
+      "the same action_key return status \"duplicate\" together with this " +
+      "result, so the caller that lost the race can continue instead of " +
+      "repeating the side effect. Free: the claim price covers the whole " +
+      "lifecycle. Completion is final and cannot be overwritten.",
+    example: {
+      namespace: "invoices",
+      action_key: "charge-order-1042",
+      namespace_token: "the token issued on your first claim",
+      result: { charge_id: "ch_abc123", amount: 4200 },
+    },
+    schema: {
+      type: "object",
+      properties: {
+        namespace: { type: "string" },
+        action_key: { type: "string" },
+        namespace_token: { type: "string" },
+        result: {
+          description: "Any JSON value, up to 16 KB once serialized.",
+        },
+        ttl: {
+          type: "number",
+          description:
+            "How long to retain the result, in seconds. Default 86400.",
+        },
+      },
+      required: ["namespace", "action_key"],
+    },
+  },
+  {
+    path: "/once-key/release",
+    summary: "Surrender a claim whose work failed",
+    description:
+      "Frees a claimed action_key so a retry can proceed immediately rather " +
+      "than waiting out the lease. Free. Refuses with 409 if the key was " +
+      "already completed, since releasing it would discard the recorded " +
+      "result and permit a second side effect.",
+    example: {
+      namespace: "invoices",
+      action_key: "charge-order-1042",
+      namespace_token: "the token issued on your first claim",
+    },
+    schema: {
+      type: "object",
+      properties: {
+        namespace: { type: "string" },
+        action_key: { type: "string" },
+        namespace_token: { type: "string" },
+      },
+      required: ["namespace", "action_key"],
+    },
+  },
+] as const;
+
 export function buildOpenApi(routes: RoutesConfig, origin: string) {
   const described = describeRoutes(routes);
   const paths: Record<string, unknown> = {};
@@ -100,6 +168,33 @@ export function buildOpenApi(routes: RoutesConfig, origin: string) {
               "carries a base64 x402 challenge naming the price, asset and " +
               "recipient. Sign it and retry with an X-PAYMENT header.",
           },
+          "429": { description: "Rate limited." },
+        },
+      },
+    };
+  }
+
+  for (const free of FREE_POST_ENDPOINTS) {
+    paths[free.path] = {
+      post: {
+        summary: free.summary,
+        description: free.description,
+        operationId: free.path
+          .replace(/[^a-zA-Z0-9]+/g, "_")
+          .replace(/^_|_$/g, ""),
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: free.schema,
+              example: free.example,
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Success" },
+          "403": { description: "Missing or invalid namespace_token." },
+          "404": { description: "No live claim for this action_key." },
           "429": { description: "Rate limited." },
         },
       },
@@ -170,6 +265,32 @@ export function buildLlmsTxt(routes: RoutesConfig, origin: string): string {
     }
   }
 
+  lines.push("## Exactly-once workflow");
+  lines.push("");
+  lines.push("`/once-key` is the endpoint you cannot replace with a library,");
+  lines.push("because it answers a question no single agent can answer alone:");
+  lines.push("has anyone, anywhere, already done this? Use it like this:");
+  lines.push("");
+  lines.push("1. `POST /once-key` with your `action_key` and a `lease_ttl`.");
+  lines.push("   - `claimed` — you won. Do the work.");
+  lines.push("   - `in_progress` — someone else is doing it. Wait");
+  lines.push("     `retry_after` seconds; do not start the work.");
+  lines.push("   - `duplicate` — already done. The `result` field holds the");
+  lines.push("     original outcome; use it and do not repeat the work.");
+  lines.push("   - `conflict` — same key, different payload hash. Your key");
+  lines.push("     derivation is wrong; do not proceed.");
+  lines.push("2. `POST /once-key/complete` with the `result`. Free. This is");
+  lines.push("   what lets every later caller learn the outcome.");
+  lines.push("3. If the work failed, `POST /once-key/release`. Free. The key");
+  lines.push("   becomes immediately retryable.");
+  lines.push("");
+  lines.push("If you pass `lease_ttl` and then crash, the claim is released");
+  lines.push("automatically once the lease lapses and the next caller takes");
+  lines.push("it over with `recovered: true`. Without `lease_ttl` a claim is");
+  lines.push("held until its full `ttl`, which is the safer default: nothing");
+  lines.push("can ever run your side effect twice.");
+  lines.push("");
+
   lines.push("## Free endpoints");
   lines.push("");
   lines.push(`- \`GET ${origin}/\` — this catalogue as JSON`);
@@ -177,6 +298,9 @@ export function buildLlmsTxt(routes: RoutesConfig, origin: string): string {
   lines.push(`- \`GET ${origin}/stats\` — usage counts, published openly so you`);
   lines.push("  can tell a maintained service from an abandoned one");
   lines.push(`- \`GET ${origin}/openapi.json\` — OpenAPI 3.1 description`);
+  for (const free of FREE_POST_ENDPOINTS) {
+    lines.push(`- \`POST ${origin}${free.path}\` — ${free.summary}`);
+  }
   lines.push(`- \`POST ${origin}/credits/balance\` — check a credit balance`);
   lines.push(`- \`${origin}/mcp\` — Model Context Protocol server (JSON-RPC)`);
   lines.push("");

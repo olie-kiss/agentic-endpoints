@@ -51,7 +51,7 @@ const TOOLS: ToolDef[] = [
     name: "once_key_claim",
     title: "Claim an action exactly once",
     description:
-      "Atomic idempotency witness. Claims a {namespace, action_key} pair exactly once, so a fleet of agents cannot perform the same side effect twice. Returns claimed, duplicate, or conflict. Use this before any non-idempotent action such as sending an email, charging a card, or posting an order. Backed by a strongly consistent Durable Object; this is not something an agent can safely reimplement locally.",
+      "Atomic idempotency witness. Claims a {namespace, action_key} pair exactly once, so a fleet of agents cannot perform the same side effect twice. Call this BEFORE any non-idempotent action such as sending an email, charging a card, or posting an order. Returns one of: 'claimed' — you won, do the work, then call once_key_complete; 'in_progress' — another agent holds a live lease, wait retry_after seconds and do NOT do the work; 'duplicate' — already done, and the 'result' field carries the original outcome, so use it instead of repeating the work; 'conflict' — the same key was claimed with a different payload hash, so your key derivation is wrong. Backed by a strongly consistent Durable Object; this is not something an agent can safely reimplement locally.",
     path: "/once-key",
     price: "$0.001",
     inputSchema: {
@@ -64,6 +64,55 @@ const TOOLS: ToolDef[] = [
         ),
         namespace_token: NAMESPACE_TOKEN,
         ttl: { type: "integer", description: "Claim lifetime in seconds (default 86400)" },
+        lease_ttl: {
+          type: "integer",
+          description:
+            "Seconds you have to call once_key_complete before the claim is treated as abandoned and another agent may take it over. Set this if your work could crash partway. Omit it to hold the claim for the full ttl, which guarantees nothing else can ever run the side effect.",
+        },
+      },
+      required: ["namespace", "action_key"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "once_key_complete",
+    title: "Record the outcome of a claimed action",
+    description:
+      "Free. Records the result of work you performed under a claim from once_key_claim. Every later claim of that action_key returns 'duplicate' along with this result, which is what lets another agent continue without repeating the side effect. Always call this after the work succeeds — a claim with no recorded result leaves every other agent unable to learn what happened. Completion is final and cannot be overwritten.",
+    path: "/once-key/complete",
+    price: "free",
+    inputSchema: {
+      type: "object",
+      properties: {
+        namespace: str("Isolation scope used when the key was claimed"),
+        action_key: str("The action_key you claimed"),
+        namespace_token: NAMESPACE_TOKEN,
+        result: {
+          description:
+            "Any JSON value describing the outcome, up to 16 KB serialized. Store large payloads elsewhere and record a reference.",
+        },
+        ttl: {
+          type: "integer",
+          description: "How long to retain the result, in seconds (default 86400)",
+        },
+      },
+      required: ["namespace", "action_key"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "once_key_release",
+    title: "Release a claim whose work failed",
+    description:
+      "Free. Surrenders a claimed action_key so a retry can start immediately instead of waiting out the lease. Call this when the work you claimed fails. Refuses if the key was already completed, because releasing it would discard the recorded result and allow the side effect to run twice.",
+    path: "/once-key/release",
+    price: "free",
+    inputSchema: {
+      type: "object",
+      properties: {
+        namespace: str("Isolation scope used when the key was claimed"),
+        action_key: str("The action_key to release"),
+        namespace_token: NAMESPACE_TOKEN,
       },
       required: ["namespace", "action_key"],
       additionalProperties: false,
@@ -341,7 +390,12 @@ app.post("/", async (c) => {
         tools: TOOLS.map((t) => ({
           name: t.name,
           title: t.title,
-          description: `${t.description} Costs ${t.price} in USDC on Base, paid via the x402 protocol.`,
+          // "Costs free in USDC on Base" would read as a price to a model,
+          // and a tool an agent believes it must pay for is a tool it skips.
+          description:
+            t.price === "free"
+              ? `${t.description} This tool is free; no payment is required.`
+              : `${t.description} Costs ${t.price} in USDC on Base, paid via the x402 protocol.`,
           inputSchema: t.inputSchema,
         })),
         // The catalogue is identical for every caller and changes only on

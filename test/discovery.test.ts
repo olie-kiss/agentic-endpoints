@@ -124,3 +124,45 @@ describe("machine-readable discovery", () => {
     }
   });
 });
+
+/**
+ * The exactly-once lifecycle is only useful if an agent can find all three
+ * of its steps. /once-key/complete and /once-key/release are free, so they
+ * are absent from the pricing table that generates everything else — which
+ * is exactly how they could silently drop out of the published documents.
+ */
+describe("exactly-once lifecycle discovery", () => {
+  const LIFECYCLE = ["/once-key/complete", "/once-key/release"];
+
+  it("documents the free lifecycle endpoints in OpenAPI", async () => {
+    const spec = (await (
+      await SELF.fetch(`${ORIGIN}/openapi.json`)
+    ).json()) as any;
+
+    for (const path of LIFECYCLE) {
+      expect(spec.paths[path]).toBeDefined();
+      expect(spec.paths[path].post.requestBody).toBeDefined();
+    }
+  });
+
+  it("documents them in llms.txt with the status an agent must branch on", async () => {
+    const body = await (await SELF.fetch(`${ORIGIN}/llms.txt`)).text();
+
+    for (const path of LIFECYCLE) {
+      expect(body).toContain(path);
+    }
+    // An agent that cannot distinguish these will either duplicate a side
+    // effect or deadlock waiting on one that already finished.
+    for (const status of ["in_progress", "duplicate", "conflict", "claimed"]) {
+      expect(body).toContain(status);
+    }
+    expect(body).toContain("lease_ttl");
+  });
+
+  it("does not price the lifecycle endpoints", async () => {
+    const priced = await pricedPaths();
+    for (const path of LIFECYCLE) {
+      expect(priced[path]).toBeUndefined();
+    }
+  });
+});
