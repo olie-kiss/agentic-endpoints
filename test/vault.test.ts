@@ -192,3 +192,181 @@ describe("vault paid-route settlement contract", () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
   });
 });
+
+describe("vault token rotation", () => {
+  it("issues a new token and invalidates the old one", async () => {
+    const n = ns();
+    const old = await claimed(n);
+
+    const res = await vault(n, "/rotate-token", { namespace_token: old });
+    expect(res.status).toBe(200);
+
+    const fresh = res.json.namespace_token as string;
+    expect(typeof fresh).toBe("string");
+    expect(fresh).not.toBe(old);
+
+    // The point of rotating is that a leaked token stops working.
+    const withOld = await vault(n, "/retrieve", {
+      key: "seed",
+      namespace_token: old,
+    });
+    expect(withOld.status).toBeGreaterThanOrEqual(400);
+
+    const withNew = await vault(n, "/retrieve", {
+      key: "seed",
+      namespace_token: fresh,
+    });
+    expect(withNew.json.status).toBe("retrieved");
+  });
+
+  it("requires the current token to rotate", async () => {
+    const n = ns();
+    await claimed(n);
+
+    // Otherwise rotation is itself the takeover primitive it defends against.
+    const res = await vault(n, "/rotate-token", {
+      namespace_token: "not-the-token",
+    });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.json.namespace_token).toBeUndefined();
+  });
+
+  it("leaves the stored items intact", async () => {
+    const n = ns();
+    const old = await claimed(n);
+    const fresh = (await vault(n, "/rotate-token", { namespace_token: old }))
+      .json.namespace_token as string;
+
+    const got = await vault(n, "/retrieve", {
+      key: "seed",
+      namespace_token: fresh,
+    });
+    expect(got.json.ciphertext).toBe("seed-value");
+  });
+});
+
+describe("vault compare-and-swap", () => {
+  it("rejects a write based on a stale version", async () => {
+    const n = ns();
+    const token = await claimed(n);
+
+    const first = await vault(n, "/store", {
+      key: "rotating-secret",
+      ciphertext: "v1",
+      namespace_token: token,
+    });
+    const version = first.json.updated_at as string;
+
+    // Someone else writes in between.
+    await vault(n, "/store", {
+      key: "rotating-secret",
+      ciphertext: "v2",
+      namespace_token: token,
+    });
+
+    const stale = await vault(n, "/store", {
+      key: "rotating-secret",
+      ciphertext: "v3-from-stale-read",
+      namespace_token: token,
+      if_match: version,
+    });
+
+    // 200, not 412: this is a paid route and comparing is the work.
+    expect(stale.status).toBe(200);
+    expect(stale.json.status).toBe("precondition_failed");
+
+    const current = await vault(n, "/retrieve", {
+      key: "rotating-secret",
+      namespace_token: token,
+    });
+    expect(current.json.ciphertext).toBe("v2");
+  });
+
+  it("allows a write on the current version", async () => {
+    const n = ns();
+    const token = await claimed(n);
+
+    const first = await vault(n, "/store", {
+      key: "k",
+      ciphertext: "v1",
+      namespace_token: token,
+    });
+
+    const res = await vault(n, "/store", {
+      key: "k",
+      ciphertext: "v2",
+      namespace_token: token,
+      if_match: first.json.updated_at as string,
+    });
+    expect(res.json.status).toBe("stored");
+  });
+
+  it("supports create-only writes", async () => {
+    const n = ns();
+    const token = await claimed(n);
+
+    const created = await vault(n, "/store", {
+      key: "new-key",
+      ciphertext: "v1",
+      namespace_token: token,
+      if_absent: true,
+    });
+    expect(created.json.status).toBe("stored");
+
+    const again = await vault(n, "/store", {
+      key: "new-key",
+      ciphertext: "clobber",
+      namespace_token: token,
+      if_absent: true,
+    });
+    expect(again.json.status).toBe("precondition_failed");
+  });
+
+  it("leaves unconditional writes as last-write-wins", async () => {
+    const n = ns();
+    const token = await claimed(n);
+
+    await vault(n, "/store", { key: "k", ciphertext: "a", namespace_token: token });
+    const res = await vault(n, "/store", {
+      key: "k",
+      ciphertext: "b",
+      namespace_token: token,
+    });
+    expect(res.json.status).toBe("stored");
+  });
+});
+
+describe("vault listing", () => {
+  it("returns keys and versions but never ciphertext", async () => {
+    const n = ns();
+    const token = await claimed(n);
+    await vault(n, "/store", {
+      key: "second",
+      ciphertext: "super-secret",
+      namespace_token: token,
+    });
+
+    const res = await vault(n, "/list", { namespace_token: token });
+    expect(res.status).toBe(200);
+    expect(res.json.count).toBe(2);
+
+    const body = JSON.stringify(res.json);
+    // Listing is $0.001; retrieving is $0.02. Leaking the value here would
+    // undercut the expensive route and hand out secrets cheaply.
+    expect(body).not.toContain("super-secret");
+
+    const keys = (res.json.items as { key: string; updated_at: string }[]).map(
+      (i) => i.key,
+    );
+    expect(keys).toEqual(["second", "seed"]);
+    // updated_at doubles as the if_match version.
+    expect(typeof (res.json.items as any[])[0].updated_at).toBe("string");
+  });
+
+  it("refuses to list without the namespace token", async () => {
+    const n = ns();
+    await claimed(n);
+    const res = await vault(n, "/list", {});
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+});

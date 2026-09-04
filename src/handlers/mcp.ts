@@ -122,7 +122,7 @@ const TOOLS: ToolDef[] = [
     name: "vault_store",
     title: "Store an encrypted secret",
     description:
-      "Store client-side encrypted data. This service never sees plaintext and cannot decrypt it. The first store claims the namespace and returns a namespace_token shown only once.",
+      "Store client-side encrypted data. This service holds no key that could decrypt it and never sees plaintext; note that the item key, namespace, alg label and size ARE stored in the clear. The first store claims the namespace and returns a namespace_token shown only once — store it immediately, because it is required by every later call and cannot be recovered. Pass if_match with an item's updated_at for a compare-and-swap write, or if_absent to create only; either returns status 'precondition_failed' rather than silently clobbering a concurrent write.",
     path: "/vault/store",
     price: "$0.02",
     inputSchema: {
@@ -134,6 +134,14 @@ const TOOLS: ToolDef[] = [
         alg: str("Algorithm label recorded alongside the item (default aes-256-gcm)"),
         ttl: { type: "integer", description: "Item lifetime in seconds" },
         namespace_token: NAMESPACE_TOKEN,
+        if_match: str(
+          "Only write if the item's current updated_at equals this. Use it whenever you are updating a value you read earlier, or a concurrent writer's change is lost silently.",
+        ),
+        if_absent: {
+          type: "boolean",
+          description:
+            "Only write if the key does not already exist. Fails with status 'precondition_failed' if it does.",
+        },
       },
       required: ["namespace", "key", "ciphertext"],
       additionalProperties: false,
@@ -188,6 +196,40 @@ const TOOLS: ToolDef[] = [
         namespace_token: NAMESPACE_TOKEN,
       },
       required: ["namespace", "key", "namespace_token"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "vault_list",
+    title: "List the keys in a vault namespace",
+    description:
+      "List the keys held in a namespace with their metadata: alg, size, timestamps. Never returns ciphertext — use vault_retrieve for that. Each item's updated_at is the version to pass back as if_match on a conditional store. Use this when you have stored secrets and need to know what is there.",
+    path: "/vault/list",
+    price: "$0.001",
+    inputSchema: {
+      type: "object",
+      properties: {
+        namespace: str("Isolation scope"),
+        namespace_token: NAMESPACE_TOKEN,
+      },
+      required: ["namespace", "namespace_token"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "vault_rotate_token",
+    title: "Rotate a vault namespace token",
+    description:
+      "Free. Mints a new namespace_token and immediately invalidates the current one, which you must present to authorize the rotation. Do this whenever the token may have been exposed — a leaked token is otherwise permanent, unrevocable read and delete access to every secret in the namespace. There is no recovery if you lose the token.",
+    path: "/vault/rotate-token",
+    price: "free",
+    inputSchema: {
+      type: "object",
+      properties: {
+        namespace: str("Isolation scope"),
+        namespace_token: NAMESPACE_TOKEN,
+      },
+      required: ["namespace", "namespace_token"],
       additionalProperties: false,
     },
   },

@@ -162,6 +162,12 @@ export class Vault extends DurableObject<Env> {
     if (url.pathname === "/exists" && request.method === "POST") {
       return this.handleExists(request);
     }
+    if (url.pathname === "/list" && request.method === "POST") {
+      return this.handleList(request);
+    }
+    if (url.pathname === "/rotate-token" && request.method === "POST") {
+      return this.handleRotateToken(request);
+    }
 
     return Response.json({ error: "Not found" }, { status: 404 });
   }
@@ -173,6 +179,8 @@ export class Vault extends DurableObject<Env> {
       alg?: string;
       ttl?: number;
       namespace_token?: string;
+      if_match?: string;
+      if_absent?: boolean;
     }>();
 
     if (!body.key || !body.ciphertext) {
@@ -275,6 +283,43 @@ export class Vault extends DurableObject<Env> {
     const expiresAt = ttl.value
       ? new Date(now.getTime() + ttl.value * 1000).toISOString()
       : null;
+
+    // Compare-and-swap, checked here so the read and the write are in the
+    // same synchronous run of the Durable Object. Any await between them
+    // would let a concurrent writer land in the gap and defeat the point.
+    //
+    // Without this, /store is last-write-wins: two agents rotating the same
+    // secret silently clobber each other and neither can tell. That is the
+    // one operation a secrets store must never lose quietly.
+    if (body.if_match !== undefined || body.if_absent) {
+      const current = this.ctx.storage.sql
+        .exec(`SELECT updated_at FROM items WHERE key = ?`, body.key)
+        .toArray()[0] as { updated_at?: string } | undefined;
+
+      const failed = body.if_absent
+        ? current !== undefined
+        : current?.updated_at !== body.if_match;
+
+      if (failed) {
+        // 200, not 412: the caller paid, and comparing is the work. A 4xx
+        // would cancel x402 settlement and make the answer free.
+        return Response.json({
+          status: "precondition_failed",
+          key: body.key,
+          updated_at: current?.updated_at ?? null,
+          detail: body.if_absent
+            ? "Key already exists and if_absent was set."
+            : "Key was modified since the version you supplied in if_match. Re-read it and retry.",
+          ...(issuedToken
+            ? {
+                namespace_token: issuedToken,
+                notice:
+                  "Save this namespace_token — it is shown only once and is required for all future operations on this namespace.",
+              }
+            : {}),
+        });
+      }
+    }
 
     // Upsert — overwrite if key already exists
     this.ctx.storage.sql.exec(
@@ -443,6 +488,101 @@ export class Vault extends DurableObject<Env> {
       status: "ok",
       key: body.key,
       exists: rows.length > 0,
+    });
+  }
+
+  /**
+   * Lists the keys in a namespace, never their contents.
+   *
+   * An agent that stored secrets and lost track of what it named them had no
+   * way to find out short of guessing, and no way to clean them up. Returns
+   * metadata only: the ciphertext is what the caller pays $0.02 to retrieve.
+   */
+  private async handleList(request: Request): Promise<Response> {
+    const body = await request.json<{ namespace_token?: string }>();
+
+    this.ensureTable();
+
+    if (!(await this.isOwner(body.namespace_token))) {
+      return this.unauthorized();
+    }
+
+    this.purgeExpired();
+
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT key, alg, size_bytes, created_at, updated_at, expires_at
+           FROM items ORDER BY key`,
+      )
+      .toArray();
+
+    const usage = this.usage();
+
+    return Response.json({
+      status: "listed",
+      count: rows.length,
+      // updated_at doubles as the version to pass back as if_match.
+      items: rows.map((r) => ({
+        key: r.key,
+        alg: r.alg,
+        size_bytes: Number(r.size_bytes ?? 0),
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        expires_at: r.expires_at,
+      })),
+      usage: {
+        items: usage.count,
+        bytes: usage.bytes,
+        max_items: MAX_ITEMS_PER_NAMESPACE,
+        max_bytes: MAX_NAMESPACE_BYTES,
+      },
+    });
+  }
+
+  /**
+   * Replaces the namespace token with a freshly minted one.
+   *
+   * A secrets store whose owner token can never be rotated is one where a
+   * single leak grants permanent, unrevocable read and delete over every
+   * secret in the namespace, with no remedy but abandoning it. Rotation is
+   * the whole reason a credential is survivable.
+   *
+   * Free, on purpose. Putting a price on the safe response to a suspected
+   * leak is how you get callers who do not rotate.
+   */
+  private async handleRotateToken(request: Request): Promise<Response> {
+    const body = await request.json<{ namespace_token?: string }>();
+
+    this.ensureTable();
+
+    // Requires the *current* token. There is deliberately no recovery path:
+    // any mechanism that could restore access without it would be a second
+    // way in, and would belong to an attacker just as readily as the owner.
+    if (!(await this.isOwner(body.namespace_token))) {
+      return this.unauthorized();
+    }
+
+    const token = generateToken();
+    const hash = await hashToken(token);
+
+    // The await above yields. Re-checking under the same synchronous run
+    // stops two concurrent rotations from both reporting success while only
+    // one token actually works — which would lock the owner out of their own
+    // namespace using a token this service told them was valid.
+    if (!(await this.isOwner(body.namespace_token))) {
+      return this.unauthorized();
+    }
+
+    this.ctx.storage.sql.exec(
+      `UPDATE namespace_meta SET token_hash = ? WHERE id = 1`,
+      hash,
+    );
+
+    return Response.json({
+      status: "rotated",
+      namespace_token: token,
+      notice:
+        "This replaces your previous namespace_token, which no longer works. It is shown only once.",
     });
   }
 }

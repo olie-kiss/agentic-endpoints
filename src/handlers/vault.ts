@@ -190,4 +190,79 @@ app.post("/exists", async (c) => {
   return c.json({ ...result, namespace: body.namespace });
 });
 
+/**
+ * POST /vault/list — $0.001
+ *
+ * List the keys in a namespace with their metadata. Never returns
+ * ciphertext; that is what /vault/retrieve is for.
+ *
+ * Each item's `updated_at` is the version to pass back as `if_match` on a
+ * conditional store.
+ *
+ * Body: { namespace, namespace_token }
+ */
+app.post("/list", async (c) => {
+  const body = await c.req.json<{
+    namespace: string;
+    namespace_token?: string;
+  }>();
+
+  if (!body.namespace) {
+    return errorResponse("namespace is required", 400);
+  }
+
+  const stub = c.env.VAULT.get(c.env.VAULT.idFromName(body.namespace));
+  const doResponse = await stub.fetch(
+    new Request("https://internal/list", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ namespace_token: body.namespace_token }),
+    }),
+  );
+
+  const result = await doResponse.json<Record<string, unknown>>();
+  if (!doResponse.ok) {
+    return c.json(result, doResponse.status as ContentfulStatusCode);
+  }
+  return c.json({ ...result, namespace: body.namespace });
+});
+
+/**
+ * POST /vault/rotate-token — free.
+ *
+ * Replaces the namespace token. Requires the current one; there is no
+ * recovery path if it is lost, because any such path would be a second way
+ * into the namespace and would serve an attacker just as well as the owner.
+ *
+ * Free deliberately: charging for the correct response to a suspected leak
+ * is how you end up with callers who do not rotate.
+ *
+ * Body: { namespace, namespace_token }
+ */
+app.post("/rotate-token", async (c) => {
+  const body = await c.req.json<{
+    namespace: string;
+    namespace_token?: string;
+  }>();
+
+  if (!body.namespace) {
+    return errorResponse("namespace is required", 400);
+  }
+
+  const stub = c.env.VAULT.get(c.env.VAULT.idFromName(body.namespace));
+  const doResponse = await stub.fetch(
+    new Request("https://internal/rotate-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ namespace_token: body.namespace_token }),
+    }),
+  );
+
+  const result = await doResponse.json<Record<string, unknown>>();
+  if (!doResponse.ok) {
+    return c.json(result, doResponse.status as ContentfulStatusCode);
+  }
+  return c.json({ ...result, namespace: body.namespace });
+});
+
 export default app;

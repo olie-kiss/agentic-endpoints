@@ -639,6 +639,50 @@ function buildRoutes(env: Env): RoutesConfig {
         },
       }),
     },
+    "/vault/list": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.001",
+      },
+      description:
+        "List the keys held in a vault namespace with their metadata, without returning any ciphertext (requires the namespace_token)",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          namespace: "agent-secrets",
+          namespace_token: "the token returned by your first store",
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Vault isolation scope" },
+            namespace_token: {
+              type: "string",
+              description: "One-time token issued when the namespace was claimed",
+            },
+          },
+          required: ["namespace", "namespace_token"],
+        },
+        output: {
+          example: {
+            status: "listed",
+            count: 1,
+            items: [
+              {
+                key: "openai-api-key",
+                alg: "aes-256-gcm",
+                size_bytes: 184,
+                created_at: "2026-01-01T00:00:00.000Z",
+                updated_at: "2026-01-01T00:00:00.000Z",
+                expires_at: null,
+              },
+            ],
+          },
+        },
+      }),
+    },
     "/vault/exists": {
       accepts: {
         scheme: "exact",

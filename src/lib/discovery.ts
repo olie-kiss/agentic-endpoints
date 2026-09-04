@@ -102,6 +102,29 @@ export const FREE_POST_ENDPOINTS = [
     },
   },
   {
+    path: "/vault/rotate-token",
+    summary: "Replace a vault namespace token",
+    description:
+      "Mints a new namespace_token and invalidates the current one, which " +
+      "must be presented to authorize the rotation. Free on purpose: " +
+      "charging for the correct response to a suspected leak is how you end " +
+      "up with callers who never rotate. There is no recovery if the token " +
+      "is lost — any such path would be a second way into the namespace and " +
+      "would serve an attacker just as well as the owner.",
+    example: {
+      namespace: "agent-secrets",
+      namespace_token: "your current token",
+    },
+    schema: {
+      type: "object",
+      properties: {
+        namespace: { type: "string" },
+        namespace_token: { type: "string" },
+      },
+      required: ["namespace", "namespace_token"],
+    },
+  },
+  {
     path: "/once-key/release",
     summary: "Surrender a claim whose work failed",
     description:
