@@ -60,6 +60,23 @@ gate, body cap and validation as a direct HTTP call. Without a valid
 `X-PAYMENT` header the tool returns `isError: true` and a machine-readable
 payment demand (price, `payTo`, asset, network) rather than performing work.
 
+## Discovery
+
+An endpoint nobody can find earns nothing, so the service is registered wherever
+agents actually look. Every catalog below was chosen because it verifies
+ownership by domain or wallet rather than by a financial account — the Coinbase
+CDP Bazaar is skipped for exactly that reason.
+
+| Catalog | Status | How |
+|---|---|---|
+| PayAI Bazaar | Listed — all 8 routes | Automatic; PayAI indexes on `/verify`, so routes list before first payment. Re-announce with `node scripts/trigger-indexing.mjs` after any route change |
+| x402-list.com | Submitted, pending review | `POST /api/v1/submit`; free because the service is on a custom domain |
+| Official MCP Registry | Pending DNS record | `./scripts/publish-registry.sh` |
+| Smithery | Not yet | `smithery mcp publish https://ai.oliverkiss.com/mcp -n @olie-kiss/agentic-endpoints` (needs a browser login) |
+
+Aggregators such as PulseMCP ingest from the official registry, so publishing
+there covers several directories at once.
+
 ## Revenue Monitoring
 
 The service could demand payment for months with no way to tell whether a
