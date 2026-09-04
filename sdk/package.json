@@ -2,18 +2,45 @@
   "name": "agentic-endpoints",
   "version": "0.1.0",
   "description": "Client for agentic-endpoints: run an action exactly once across a fleet of AI agents, paid per call in USDC on Base via x402.",
-  "keywords": ["x402", "ai-agents", "idempotency", "exactly-once", "mcp", "usdc", "base", "agent-payments"],
+  "keywords": [
+    "x402",
+    "ai-agents",
+    "idempotency",
+    "exactly-once",
+    "mcp",
+    "usdc",
+    "base",
+    "agent-payments"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
-  "files": ["dist", "README.md"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "homepage": "https://ai.oliverkiss.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/olie-kiss/agentic-endpoints.git",
+    "directory": "sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/olie-kiss/agentic-endpoints/issues"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.js",
     "prepublishOnly": "npm run build"
   },
-  "devDependencies": { "typescript": "^5.6.0" }
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
 }
