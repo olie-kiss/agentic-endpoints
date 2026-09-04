@@ -227,3 +227,45 @@ function buildMinimalPdf(text: string): string {
   pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
   return pdf;
 }
+
+describe("service catalogue", () => {
+  it("advertises the same price it charges", async () => {
+    // The catalogue used to be hand-maintained and drifted: it told agents
+    // three paid vault routes were free.
+    const res = await SELF.fetch("https://ai.oliverkiss.com/", {
+      headers: { Accept: "application/json" },
+    });
+    const { endpoints } = await res.json();
+
+    for (const ep of endpoints) {
+      if (!ep.price.startsWith("$")) continue;
+
+      const challenge = await SELF.fetch(`https://ai.oliverkiss.com${ep.path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+
+      // 503 means the facilitator is unreachable, which says nothing about price.
+      if (challenge.status !== 402) continue;
+
+      const body = await challenge.json();
+      const quoted = body?.accepts?.[0]?.price ?? body?.accepts?.[0]?.maxAmountRequired;
+      if (quoted) expect(String(quoted)).toContain(ep.price.replace("$", ""));
+    }
+  });
+
+  it("lists every paid route as paid", async () => {
+    const res = await SELF.fetch("https://ai.oliverkiss.com/", {
+      headers: { Accept: "application/json" },
+    });
+    const { endpoints } = await res.json();
+    const paid = endpoints.filter((e) => e.price.startsWith("$")).map((e) => e.path);
+
+    for (const path of ["/once-key", "/compress", "/scrape", "/pdf-parse",
+                        "/vault/store", "/vault/retrieve", "/vault/delete",
+                        "/vault/exists", "/credits/buy", "/credits/buy-25"]) {
+      expect(paid, `${path} must be advertised as paid`).toContain(path);
+    }
+  });
+});

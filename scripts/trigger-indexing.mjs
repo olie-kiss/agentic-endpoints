@@ -20,27 +20,42 @@ import { toClientEvmSigner } from "@x402/evm";
 const BASE = "eip155:8453";
 const baseUrl = process.argv[2] ?? "https://ai.oliverkiss.com";
 
-const PAID_ROUTES = [
-  { path: "/once-key", body: { namespace: "bazaar-probe", action_key: "probe" } },
-  { path: "/compress", body: { text: "hello world" } },
-  { path: "/pdf-parse", body: { url: "https://example.com/a.pdf" } },
-  { path: "/scrape", body: { url: "https://example.com" } },
-  {
-    path: "/vault/store",
-    body: { namespace: "bazaar-probe", key: "k", ciphertext: "c" },
-  },
-  { path: "/vault/retrieve", body: { namespace: "bazaar-probe", key: "k" } },
-  { path: "/vault/delete", body: { namespace: "bazaar-probe", key: "k" } },
-  { path: "/vault/exists", body: { namespace: "bazaar-probe", key: "k" } },
-];
+// Probe bodies only. The route list itself is fetched from the live
+// catalogue, which is generated from the payment config -- a hardcoded copy
+// here would silently stop announcing any route added later, which is exactly
+// how three vault routes went unlisted.
+const PROBE_BODIES = {
+  "/once-key": { namespace: "bazaar-probe", action_key: "probe" },
+  "/compress": { text: "hello world" },
+  "/pdf-parse": { url: "https://example.com/a.pdf" },
+  "/scrape": { url: "https://example.com" },
+  "/vault/store": { namespace: "bazaar-probe", key: "k", ciphertext: "c" },
+  "/vault/retrieve": { namespace: "bazaar-probe", key: "k" },
+  "/vault/delete": { namespace: "bazaar-probe", key: "k" },
+  "/vault/exists": { namespace: "bazaar-probe", key: "k" },
+};
+
+const catalogue = await fetch(`${baseUrl}/`, {
+  headers: { Accept: "application/json" },
+}).then((r) => r.json());
+
+const PAID_ROUTES = catalogue.endpoints
+  .filter((e) => e.price.startsWith("$"))
+  .map((e) => ({ path: e.path, body: PROBE_BODIES[e.path] ?? {} }));
+
+console.log(`Announcing ${PAID_ROUTES.length} paid routes from the live catalogue`);
 
 const account = privateKeyToAccount(generatePrivateKey());
 console.log(`Throwaway signer: ${account.address} (never funded)\n`);
 
-const client = new x402Client().register(
-  BASE,
-  new ExactEvmScheme(toClientEvmSigner(account)),
-);
+// Spend controls default to a $1 cap, which silently refuses to announce the
+// $5 and $25 credit packs. Disabled here because the signer is a throwaway key
+// that is never funded: every payment is expected to fail on balance, and the
+// announcement is the only purpose.
+const client = x402Client.fromConfig({
+  schemes: [{ network: BASE, client: new ExactEvmScheme(toClientEvmSigner(account)) }],
+  spendControls: false,
+});
 const http = new x402HTTPClient(client);
 
 for (const route of PAID_ROUTES) {

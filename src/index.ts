@@ -77,87 +77,51 @@ app.get("/", (c) => {
     accept.includes("application/json") &&
     !accept.includes("text/html")
   ) {
+    // Generated from the payment config rather than hand-written, so the
+    // advertised price is by construction the price actually charged. The
+    // previous hand-maintained copy drifted and told agents three paid vault
+    // routes were free.
+    const paid = Object.entries(buildRoutes(c.env)).map(([route, config]) => {
+      const [method, path] = /^[A-Z]+\s/.test(route)
+        ? route.split(/\s+/)
+        : ["POST", route];
+
+      const cfg = config as {
+        accepts?: { price?: string };
+        description?: string;
+      };
+
+      return {
+        path,
+        method,
+        price: cfg.accepts?.price ?? "unknown",
+        description: cfg.description ?? "",
+      };
+    });
+
     return c.json({
       name: "agentic-endpoints",
       version: "1.0.0",
       protocol: "x402",
+      payment: {
+        per_call: "Send X-PAYMENT (x402, USDC on Base) with each request.",
+        prepaid:
+          "Or buy credits once at POST /credits/buy and send X-Credit-Token instead — no per-call signature.",
+      },
       endpoints: [
+        ...paid,
         {
-          path: "/once-key",
+          path: "/credits/balance",
           method: "POST",
-          price: "$0.001",
-          description:
-            "Atomic idempotency witness — claim a key exactly once",
-        },
-        {
-          path: "/scrape",
-          method: "POST",
-          price: "$0.005",
-          description: "Pay-per-query web scraping and text extraction",
-        },
-        {
-          path: "/pdf-parse",
-          method: "POST",
-          price: "$0.01",
-          description: "PDF text extraction from URL",
-        },
-        {
-          path: "/compress",
-          method: "POST",
-          price: "$0.005",
-          description: "Token compression / context reduction for LLMs",
-        },
-        {
-          path: "/vault/store",
-          method: "POST",
-          price: "$0.02",
-          description:
-            "Store an encrypted item (client-side encryption). The first write to a namespace returns a one-time namespace_token required for all later operations.",
-        },
-        {
-          path: "/vault/retrieve",
-          method: "POST",
-          price: "$0.02",
-          description: "Retrieve an encrypted item (requires namespace_token)",
-        },
-        {
-          path: "/vault/delete",
-          method: "POST",
-          price: "$0.005",
-          description: "Delete an encrypted item (requires namespace_token)",
-        },
-        {
-          path: "/vault/exists",
-          method: "POST",
-          price: "$0.001",
-          description:
-            "Check if an encrypted item exists (requires namespace_token)",
+          price: "free",
+          description: "Check a credit balance (requires X-Credit-Token)",
         },
         {
           path: "/mcp",
           method: "POST",
           price: "free to list, per-tool price to call",
           description:
-            "Remote MCP server (Streamable HTTP). tools/list is free; each tool re-enters the paid route above and returns its x402 payment demand until paid.",
-        },
-        {
-          path: "/credits/buy",
-          method: "POST",
-          price: "$5.00",
-          description:
-            "Buy $6.00 of prepaid credit (20% bonus). Returns a token to send as X-Credit-Token; no per-call payment signature needed.",
-        },
-        {
-          path: "/credits/buy-25",
-          method: "POST",
-          price: "$25.00",
-          description: "Buy $32.50 of prepaid credit (30% bonus).",
-        },
-        {
-          path: "/credits/balance",
-          method: "POST",
-          price: "free",
-          description: "Check a credit balance (requires X-Credit-Token)",
+            "Remote MCP server (Streamable HTTP). tools/list is free; each tool re-enters the paid route above.",
         },
         {
           path: "/revenue",
@@ -276,6 +240,375 @@ app.route("/mcp", mcpHandler);
 let gatedApp: Hono<{ Bindings: Env }> | null = null;
 
 /**
+ * The single source of truth for what is paid and how much.
+ *
+ * Everything that needs to know about pricing derives from this: the
+ * payment gate, the credit debit, the public catalogue and the discovery
+ * metadata. Keeping a second hand-maintained list was not a hypothetical
+ * risk -- it shipped three vault routes for free, and later advertised them
+ * as free after they had been priced.
+ */
+const BASE = "eip155:8453"; // Base mainnet
+
+function buildRoutes(env: Env): RoutesConfig {
+  return {
+    "/once-key": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.001",
+      },
+      description: "Atomic idempotency witness",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: {
+              type: "string",
+              description: "Isolation scope for the claimed key",
+            },
+            action_key: {
+              type: "string",
+              description: "Unique key to claim exactly once",
+            },
+            payload_sha256: {
+              type: "string",
+              description: "Optional hash of the payload for conflict detection",
+            },
+            ttl: {
+              type: "number",
+              description: "Claim lifetime in seconds (default 86400)",
+            },
+          },
+          required: ["namespace", "action_key"],
+        },
+        output: {
+          example: {
+            status: "claimed",
+            namespace: "my-app",
+            action_key: "order-12345",
+            claimed_at: "2026-01-01T00:00:00.000Z",
+            expires_at: "2026-01-02T00:00:00.000Z",
+            receipt: "abc123...",
+          },
+        },
+      }),
+    },
+    "/scrape": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.005",
+      },
+      description: "Web scraping and text extraction",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "URL to scrape" },
+            selector: {
+              type: "string",
+              description: "Optional CSS selector to extract",
+            },
+            format: {
+              type: "string",
+              enum: ["text", "markdown", "html"],
+              description: "Output format (default text)",
+            },
+          },
+          required: ["url"],
+        },
+        output: {
+          example: {
+            url: "https://example.com",
+            title: "Example Domain",
+            content: "This domain is for use in examples...",
+            format: "text",
+            extracted_at: "2026-01-01T00:00:00.000Z",
+          },
+        },
+      }),
+    },
+    "/pdf-parse": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.01",
+      },
+      description: "PDF text extraction",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "URL of the PDF" },
+            pages: {
+              type: "array",
+              items: { type: "number" },
+              description: "Specific pages to extract (default: all)",
+            },
+          },
+          required: ["url"],
+        },
+        output: {
+          example: {
+            url: "https://example.com/doc.pdf",
+            page_count: 3,
+            pages: [{ page: 1, text: "..." }],
+            extracted_at: "2026-01-01T00:00:00.000Z",
+          },
+        },
+      }),
+    },
+    "/compress": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.005",
+      },
+      description: "Token compression for LLMs",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: {
+          type: "object",
+          properties: {
+            text: { type: "string", description: "Text to compress" },
+            target_tokens: {
+              type: "number",
+              description: "Target token count",
+            },
+            strategy: {
+              type: "string",
+              enum: ["extractive", "truncate"],
+              description: "Compression strategy (default extractive)",
+            },
+          },
+          required: ["text"],
+        },
+        output: {
+          example: {
+            original_length: 5000,
+            compressed_length: 1200,
+            ratio: 0.24,
+            text: "...",
+            strategy: "extractive",
+          },
+        },
+      }),
+    },
+    "/vault/store": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.02",
+      },
+      description:
+        "Store an encrypted item in the vault. The first store claims the namespace and returns a one-time namespace_token.",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Vault isolation scope" },
+            key: { type: "string", description: "Item key" },
+            ciphertext: {
+              type: "string",
+              description:
+                "Client-side encrypted payload. This service never sees plaintext.",
+            },
+            alg: {
+              type: "string",
+              description: "Encryption algorithm label (default aes-256-gcm)",
+            },
+            ttl: {
+              type: "number",
+              description: "Optional lifetime in seconds",
+            },
+            namespace_token: {
+              type: "string",
+              description:
+                "Required once the namespace has been claimed by a first store",
+            },
+          },
+          required: ["namespace", "key", "ciphertext"],
+        },
+        output: {
+          example: {
+            status: "stored",
+            namespace: "my-app",
+            key: "secret-1",
+            alg: "aes-256-gcm",
+            size_bytes: 128,
+            created_at: "2026-01-01T00:00:00.000Z",
+            updated_at: "2026-01-01T00:00:00.000Z",
+            expires_at: null,
+            namespace_token: "shown-once-on-first-store",
+            receipt: "abc123...",
+          },
+        },
+      }),
+    },
+
+    "/vault/delete": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.005",
+      },
+      description:
+        "Delete an item from the vault (requires the namespace_token)",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Vault isolation scope" },
+            key: { type: "string", description: "Item key to delete" },
+            namespace_token: {
+              type: "string",
+              description: "One-time token issued when the namespace was claimed",
+            },
+          },
+          required: ["namespace", "key", "namespace_token"],
+        },
+        output: {
+          example: { status: "deleted", namespace: "my-app", key: "secret-1" },
+        },
+      }),
+    },
+
+    /**
+     * Prepaid packs. Priced above the per-call routes on purpose: this is
+     * the only place a buyer commits real money in one go, and the bonus is
+     * what makes committing rational for them.
+     */
+    "/credits/buy": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$5.00",
+      },
+      description:
+        "Buy $6.00 of prepaid credit for $5.00 (20% bonus). Returns a credit token; send it as X-Credit-Token on any paid endpoint to be debited at list price with no per-call payment signature.",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: { type: "object", properties: {} },
+        output: {
+          example: {
+            credit_token: "ae_...",
+            balance_usd: "6.000000",
+            paid: "$5.00",
+            bonus: "20%",
+          },
+        },
+      }),
+    },
+    "/credits/buy-25": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$25.00",
+      },
+      description:
+        "Buy $32.50 of prepaid credit for $25.00 (30% bonus). Returns a credit token; send it as X-Credit-Token on any paid endpoint to be debited at list price with no per-call payment signature.",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: { type: "object", properties: {} },
+        output: {
+          example: {
+            credit_token: "ae_...",
+            balance_usd: "32.500000",
+            paid: "$25.00",
+            bonus: "30%",
+          },
+        },
+      }),
+    },
+    "/vault/exists": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.001",
+      },
+      description:
+        "Check whether a key exists in the vault without returning its ciphertext (requires the namespace_token)",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Vault isolation scope" },
+            key: { type: "string", description: "Item key to test" },
+            namespace_token: {
+              type: "string",
+              description: "One-time token issued when the namespace was claimed",
+            },
+          },
+          required: ["namespace", "key", "namespace_token"],
+        },
+        output: {
+          example: { exists: true, namespace: "my-app", key: "secret-1" },
+        },
+      }),
+    },
+
+    "/vault/retrieve": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.02",
+      },
+      description:
+        "Retrieve an encrypted item from the vault (requires the namespace_token issued at claim time)",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: {
+              type: "string",
+              description: "Vault isolation scope",
+            },
+            key: { type: "string", description: "Item key to retrieve" },
+            namespace_token: {
+              type: "string",
+              description:
+                "One-time token issued by the first /vault/store call that claimed this namespace",
+            },
+          },
+          required: ["namespace", "key", "namespace_token"],
+        },
+        output: {
+          example: {
+            status: "retrieved",
+            namespace: "my-app",
+            key: "secret-1",
+            ciphertext: "base64-encoded-ciphertext",
+            alg: "aes-256-gcm",
+            created_at: "2026-01-01T00:00:00.000Z",
+            updated_at: "2026-01-01T00:00:00.000Z",
+            expires_at: null,
+            receipt: "abc123...",
+          },
+        },
+      }),
+    },
+  };
+}
+
+/**
  * Marks a request that this Worker generated for itself. The MCP handler
  * re-enters the pipeline to reach the paid routes; without this the caller
  * would be metered twice for a single tool call.
@@ -288,366 +621,10 @@ async function handleRequest(
   ctx: ExecutionContext,
 ): Promise<Response> {
   {
-    const BASE = "eip155:8453"; // Base mainnet
-
     // x402 route pricing config — maps route patterns to payment requirements,
     // plus Bazaar discovery metadata so agents can find and call these routes
     // automatically via the x402 Bazaar catalog.
-    const routes: RoutesConfig = {
-      "/once-key": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$0.001",
-        },
-        description: "Atomic idempotency witness",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: {
-            type: "object",
-            properties: {
-              namespace: {
-                type: "string",
-                description: "Isolation scope for the claimed key",
-              },
-              action_key: {
-                type: "string",
-                description: "Unique key to claim exactly once",
-              },
-              payload_sha256: {
-                type: "string",
-                description: "Optional hash of the payload for conflict detection",
-              },
-              ttl: {
-                type: "number",
-                description: "Claim lifetime in seconds (default 86400)",
-              },
-            },
-            required: ["namespace", "action_key"],
-          },
-          output: {
-            example: {
-              status: "claimed",
-              namespace: "my-app",
-              action_key: "order-12345",
-              claimed_at: "2026-01-01T00:00:00.000Z",
-              expires_at: "2026-01-02T00:00:00.000Z",
-              receipt: "abc123...",
-            },
-          },
-        }),
-      },
-      "/scrape": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$0.005",
-        },
-        description: "Web scraping and text extraction",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: {
-            type: "object",
-            properties: {
-              url: { type: "string", description: "URL to scrape" },
-              selector: {
-                type: "string",
-                description: "Optional CSS selector to extract",
-              },
-              format: {
-                type: "string",
-                enum: ["text", "markdown", "html"],
-                description: "Output format (default text)",
-              },
-            },
-            required: ["url"],
-          },
-          output: {
-            example: {
-              url: "https://example.com",
-              title: "Example Domain",
-              content: "This domain is for use in examples...",
-              format: "text",
-              extracted_at: "2026-01-01T00:00:00.000Z",
-            },
-          },
-        }),
-      },
-      "/pdf-parse": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$0.01",
-        },
-        description: "PDF text extraction",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: {
-            type: "object",
-            properties: {
-              url: { type: "string", description: "URL of the PDF" },
-              pages: {
-                type: "array",
-                items: { type: "number" },
-                description: "Specific pages to extract (default: all)",
-              },
-            },
-            required: ["url"],
-          },
-          output: {
-            example: {
-              url: "https://example.com/doc.pdf",
-              page_count: 3,
-              pages: [{ page: 1, text: "..." }],
-              extracted_at: "2026-01-01T00:00:00.000Z",
-            },
-          },
-        }),
-      },
-      "/compress": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$0.005",
-        },
-        description: "Token compression for LLMs",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: {
-            type: "object",
-            properties: {
-              text: { type: "string", description: "Text to compress" },
-              target_tokens: {
-                type: "number",
-                description: "Target token count",
-              },
-              strategy: {
-                type: "string",
-                enum: ["extractive", "truncate"],
-                description: "Compression strategy (default extractive)",
-              },
-            },
-            required: ["text"],
-          },
-          output: {
-            example: {
-              original_length: 5000,
-              compressed_length: 1200,
-              ratio: 0.24,
-              text: "...",
-              strategy: "extractive",
-            },
-          },
-        }),
-      },
-      "/vault/store": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$0.02",
-        },
-        description:
-          "Store an encrypted item in the vault. The first store claims the namespace and returns a one-time namespace_token.",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: {
-            type: "object",
-            properties: {
-              namespace: { type: "string", description: "Vault isolation scope" },
-              key: { type: "string", description: "Item key" },
-              ciphertext: {
-                type: "string",
-                description:
-                  "Client-side encrypted payload. This service never sees plaintext.",
-              },
-              alg: {
-                type: "string",
-                description: "Encryption algorithm label (default aes-256-gcm)",
-              },
-              ttl: {
-                type: "number",
-                description: "Optional lifetime in seconds",
-              },
-              namespace_token: {
-                type: "string",
-                description:
-                  "Required once the namespace has been claimed by a first store",
-              },
-            },
-            required: ["namespace", "key", "ciphertext"],
-          },
-          output: {
-            example: {
-              status: "stored",
-              namespace: "my-app",
-              key: "secret-1",
-              alg: "aes-256-gcm",
-              size_bytes: 128,
-              created_at: "2026-01-01T00:00:00.000Z",
-              updated_at: "2026-01-01T00:00:00.000Z",
-              expires_at: null,
-              namespace_token: "shown-once-on-first-store",
-              receipt: "abc123...",
-            },
-          },
-        }),
-      },
-
-      "/vault/delete": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$0.005",
-        },
-        description:
-          "Delete an item from the vault (requires the namespace_token)",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: {
-            type: "object",
-            properties: {
-              namespace: { type: "string", description: "Vault isolation scope" },
-              key: { type: "string", description: "Item key to delete" },
-              namespace_token: {
-                type: "string",
-                description: "One-time token issued when the namespace was claimed",
-              },
-            },
-            required: ["namespace", "key", "namespace_token"],
-          },
-          output: {
-            example: { status: "deleted", namespace: "my-app", key: "secret-1" },
-          },
-        }),
-      },
-
-      /**
-       * Prepaid packs. Priced above the per-call routes on purpose: this is
-       * the only place a buyer commits real money in one go, and the bonus is
-       * what makes committing rational for them.
-       */
-      "/credits/buy": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$5.00",
-        },
-        description:
-          "Buy $6.00 of prepaid credit for $5.00 (20% bonus). Returns a credit token; send it as X-Credit-Token on any paid endpoint to be debited at list price with no per-call payment signature.",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: { type: "object", properties: {} },
-          output: {
-            example: {
-              credit_token: "ae_...",
-              balance_usd: "6.000000",
-              paid: "$5.00",
-              bonus: "20%",
-            },
-          },
-        }),
-      },
-      "/credits/buy-25": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$25.00",
-        },
-        description:
-          "Buy $32.50 of prepaid credit for $25.00 (30% bonus). Returns a credit token; send it as X-Credit-Token on any paid endpoint to be debited at list price with no per-call payment signature.",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: { type: "object", properties: {} },
-          output: {
-            example: {
-              credit_token: "ae_...",
-              balance_usd: "32.500000",
-              paid: "$25.00",
-              bonus: "30%",
-            },
-          },
-        }),
-      },
-      "/vault/exists": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$0.001",
-        },
-        description:
-          "Check whether a key exists in the vault without returning its ciphertext (requires the namespace_token)",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: {
-            type: "object",
-            properties: {
-              namespace: { type: "string", description: "Vault isolation scope" },
-              key: { type: "string", description: "Item key to test" },
-              namespace_token: {
-                type: "string",
-                description: "One-time token issued when the namespace was claimed",
-              },
-            },
-            required: ["namespace", "key", "namespace_token"],
-          },
-          output: {
-            example: { exists: true, namespace: "my-app", key: "secret-1" },
-          },
-        }),
-      },
-
-      "/vault/retrieve": {
-        accepts: {
-          scheme: "exact",
-          network: BASE,
-          payTo: env.X402_PAY_TO,
-          price: "$0.02",
-        },
-        description:
-          "Retrieve an encrypted item from the vault (requires the namespace_token issued at claim time)",
-        extensions: declareDiscoveryExtension({
-          bodyType: "json",
-          inputSchema: {
-            type: "object",
-            properties: {
-              namespace: {
-                type: "string",
-                description: "Vault isolation scope",
-              },
-              key: { type: "string", description: "Item key to retrieve" },
-              namespace_token: {
-                type: "string",
-                description:
-                  "One-time token issued by the first /vault/store call that claimed this namespace",
-              },
-            },
-            required: ["namespace", "key", "namespace_token"],
-          },
-          output: {
-            example: {
-              status: "retrieved",
-              namespace: "my-app",
-              key: "secret-1",
-              ciphertext: "base64-encoded-ciphertext",
-              alg: "aes-256-gcm",
-              created_at: "2026-01-01T00:00:00.000Z",
-              updated_at: "2026-01-01T00:00:00.000Z",
-              expires_at: null,
-              receipt: "abc123...",
-            },
-          },
-        }),
-      },
-    };
+    const routes = buildRoutes(env);
 
     /**
      * These checks run on every request, before anything that could depend
@@ -706,7 +683,8 @@ async function handleRequest(
      */
     const creditToken = request.headers.get("X-Credit-Token");
     if (creditToken && path !== "/credits/buy" && path !== "/credits/buy-25") {
-      const priced = routes[path] ?? routes[`POST ${path}`];
+      const priced = (routes as Record<string, unknown>)[path] ??
+        (routes as Record<string, unknown>)[`POST ${path}`];
       const priceMicros = parsePriceMicros(
         (priced as { accepts?: { price?: string } })?.accepts?.price,
       );
