@@ -113,7 +113,7 @@ CDP Bazaar is skipped for exactly that reason.
 |---|---|---|
 | PayAI Bazaar | Not listed on mainnet — **mechanism proven on testnet** | Listing requires a payment that *settles*, once per route; reaching `/verify` does nothing. Confirmed on Base Sepolia: all 9 routes appeared in `/discovery/resources` within seconds of paying. `X402_TEST_PRIVATE_KEY=0x... node scripts/trigger-indexing.mjs` costs **$0.068** for the whole catalogue |
 | x402-list.com | Submitted, pending review | `POST /api/v1/submit`; free because the service is on a custom domain |
-| Official MCP Registry | Pending DNS record | `./scripts/publish-registry.sh` (verified: validates the manifest, fails cleanly until the TXT record exists) |
+| Official MCP Registry | **Published — `com.oliverkiss/agentic-endpoints`, status active** | `./scripts/publish-registry.sh`. Ownership proven by an apex TXT record and an ed25519-signed timestamp, so no financial account is involved |
 | Smithery | Not yet | `smithery mcp publish https://ai.oliverkiss.com/mcp -n @olie-kiss/agentic-endpoints` (needs a browser login) |
 
 Aggregators such as PulseMCP ingest from the official registry, so publishing

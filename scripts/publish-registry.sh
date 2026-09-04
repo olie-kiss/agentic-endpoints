@@ -43,10 +43,19 @@ echo "    ok"
 
 echo "==> Checking the DNS TXT record is visible"
 expected_pub="$("$OSSL" pkey -in "$KEY" -pubout -outform DER | tail -c 32 | base64)"
-if ! dig +short TXT "$DOMAIN" | grep -qF "$expected_pub"; then
+# Resolved over DNS-over-HTTPS rather than dig. On a network that filters or
+# rewrites port 53, dig returns an empty answer for a record that is
+# demonstrably published, and this script then blames the user for a missing
+# record they already added. DoH also drops the dependency on dig being
+# installed at all.
+txt="$(curl -sS --max-time 20 -H 'accept: application/dns-json' \
+  "https://cloudflare-dns.com/dns-query?name=${DOMAIN}&type=TXT" || true)"
+
+if ! printf '%s' "$txt" | grep -qF "$expected_pub"; then
   echo "No TXT record on $DOMAIN matching this key." >&2
   echo "Expected content: v=MCPv1; k=ed25519; p=$expected_pub" >&2
   echo "It must be on the APEX (name '@'), not a subdomain, and DNS may take a few minutes." >&2
+  echo "Resolver said: ${txt:-<no response>}" >&2
   exit 1
 fi
 echo "    ok"
