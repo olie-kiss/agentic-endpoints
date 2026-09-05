@@ -1,5 +1,7 @@
-import { SELF } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { buildRoutes } from "../src/index";
+import type { Env } from "../src/types";
 
 /**
  * Regressions for the payment gate itself.
@@ -10,19 +12,18 @@ import { describe, expect, it } from "vitest";
  * for free.
  */
 
-const PAID_PATHS = [
-  "/compress",
-  "/scrape",
-  "/pdf-parse",
-  "/once-key",
-  "/vault/store",
-  "/vault/retrieve",
-  "/vault/list",
-  "/vault/delete",
-  "/vault/exists",
-  "/credits/buy",
-  "/credits/buy-25",
-];
+/**
+ * Derived from the route table, never hand-listed.
+ *
+ * This was a static array, and a static array silently fails to cover any
+ * route added after it was written -- so the one test that proves the product
+ * cannot be taken for free would quietly stop covering the newest, least
+ * reviewed code. Deriving it means a new paid route is gate-tested the moment
+ * it is priced, with no way to forget.
+ */
+const PAID_PATHS = Object.keys(buildRoutes(env as unknown as Env)).map((route) =>
+  /^[A-Z]+\s/.test(route) ? route.split(/\s+/)[1] : route,
+);
 
 /** Percent-encode the first alphabetic character of the last path segment. */
 function encodeOneChar(path: string): string {
@@ -45,6 +46,23 @@ function encodeOneChar(path: string): string {
 const GATED = [402, 503];
 
 describe("paid path gate", () => {
+  it("derives the paid path list from the route table that prices them", () => {
+    // Guards the derivation itself: if buildRoutes ever returned nothing, the
+    // loops below would pass by iterating over an empty list -- a green suite
+    // asserting nothing at all.
+    expect(PAID_PATHS.length).toBeGreaterThanOrEqual(16);
+    for (const known of [
+      "/compress",
+      "/once-key",
+      "/vault/store",
+      "/credits/buy",
+      "/meetings/import",
+      "/meetings/search",
+    ]) {
+      expect(PAID_PATHS).toContain(known);
+    }
+  });
+
   it("never returns work for a paid path without payment", async () => {
     for (const path of PAID_PATHS) {
       const res = await SELF.fetch(`https://ai.oliverkiss.com${path}`, {

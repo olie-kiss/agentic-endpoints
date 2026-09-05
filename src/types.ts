@@ -2,6 +2,7 @@ export interface Env {
   // Durable Objects
   ONCE_KEY: DurableObjectNamespace;
   VAULT: DurableObjectNamespace;
+  MEETINGS: DurableObjectNamespace;
   CREDITS: DurableObjectNamespace;
   STATS: DurableObjectNamespace;
 

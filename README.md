@@ -14,6 +14,11 @@ Live at **https://ai.oliverkiss.com**
 | `/scrape` | POST | $0.005 | Web scraping and text extraction |
 | `/pdf-parse` | POST | $0.01 | PDF text extraction from a URL |
 | `/compress` | POST | $0.005 | Token compression / context reduction for LLMs |
+| `/meetings/import` | POST | $0.004 | Import a meeting transcript, private or searchable |
+| `/meetings/search` | POST | $0.006 | Full-text search across your meetings |
+| `/meetings/get` | POST | $0.002 | Read one meeting in full |
+| `/meetings/list` | POST | $0.001 | List meetings (metadata only) |
+| `/meetings/delete` | POST | $0.001 | Delete a meeting and its index entry |
 | `/vault/store` | POST | $0.02 | Store a client-encrypted item |
 | `/vault/retrieve` | POST | $0.02 | Retrieve a client-encrypted item |
 | `/vault/delete` | POST | $0.005 | Delete an item |
@@ -378,6 +383,58 @@ billed for a result that is known to be useless.
 POST /compress
 { "text": "Your very long text here...", "target_tokens": 500, "strategy": "extractive" }
 ```
+
+### Meeting memory (agent-queryable transcripts)
+
+Meeting notetakers keep transcripts inside their own app, where the only reader
+is a human scrolling a sidebar. This puts them somewhere your agents can ask
+questions of them.
+
+**You choose, per meeting, whether this service can read it. The choice is
+required, and the wrong field for the mode is refused rather than guessed.**
+
+| `visibility` | You send | Stored as | Searchable | We can read it |
+|---|---|---|---|---|
+| `private` (default) | `ciphertext` | opaque bytes | no | no |
+| `queryable` | `transcript` | plaintext + FTS index | yes | yes |
+
+Sending plaintext as `private` is an error rather than a quiet indexing, and
+sending ciphertext as `queryable` is an error rather than a meeting that can
+never match a search. Both refusals exist because the failure they prevent is
+silent and only discovered long after it matters.
+
+```bash
+# First import claims the namespace and returns a one-time token.
+curl -X POST https://ai.oliverkiss.com/meetings/import \
+  -H "Content-Type: application/json" \
+  -d '{
+    "namespace": "my-meetings-4f9c2b1e8d7a",
+    "title": "Pricing review",
+    "occurred_at": "2026-09-01T15:00:00.000Z",
+    "source": "zoom-vtt",
+    "visibility": "queryable",
+    "participants": ["Alice", "Bob"],
+    "transcript": "Alice: we agreed to hold pricing at nine dollars a month."
+  }'
+
+# Then ask a question of every meeting at once.
+curl -X POST https://ai.oliverkiss.com/meetings/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "namespace": "my-meetings-4f9c2b1e8d7a",
+    "namespace_token": "<from the first import>",
+    "query": "pricing"
+  }'
+```
+
+Search returns ranked excerpts plus `searched_meetings` and
+`private_meetings_skipped`. Read them. If `searched_meetings` is `0`, an empty
+result means **nothing was searched**, not that the topic was never discussed —
+and an agent that conflates those will confidently tell a user something never
+happened.
+
+Via MCP the same thing is `meetings_search`, `meetings_import`, `meetings_get`
+and `meetings_list`.
 
 ### Vault
 

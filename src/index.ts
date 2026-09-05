@@ -37,11 +37,13 @@ import {
   shouldAlertOnFailure,
 } from "./lib/revenue";
 import vaultHandler from "./handlers/vault";
+import meetingsHandler from "./handlers/meetings";
 import { landingPage } from "./pages/landing";
 
 // Re-export the Durable Object classes so wrangler can find them
 export { OnceKey } from "./durable-objects/once-key";
 export { Vault } from "./durable-objects/vault";
+export { MeetingMemory } from "./durable-objects/meeting-memory";
 export { Credits } from "./durable-objects/credits";
 export { Stats } from "./durable-objects/stats";
 
@@ -226,6 +228,7 @@ app.route("/scrape", webScraperHandler);
 app.route("/pdf-parse", pdfParserHandler);
 app.route("/compress", tokenCompressorHandler);
 app.route("/vault", vaultHandler);
+app.route("/meetings", meetingsHandler);
 app.route("/credits", creditsHandler);
 
 /**
@@ -402,7 +405,7 @@ export function networkFor(env: Env): typeof BASE_MAINNET | typeof BASE_SEPOLIA 
   return env.X402_NETWORK === BASE_SEPOLIA ? BASE_SEPOLIA : BASE_MAINNET;
 }
 
-function buildRoutes(env: Env): RoutesConfig {
+export function buildRoutes(env: Env): RoutesConfig {
   const BASE = networkFor(env);
   return {
     "/once-key": {
@@ -726,6 +729,211 @@ function buildRoutes(env: Env): RoutesConfig {
             balance_usd: "32.500000",
             paid: "$25.00",
             bonus: "30%",
+          },
+        },
+      }),
+    },
+    "/meetings/import": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.004",
+      },
+      description:
+        'Import a meeting transcript. visibility "private" stores ciphertext this service cannot read; "queryable" stores plaintext and indexes it for search. The first import claims the namespace and returns a one-time namespace_token.',
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          namespace: "my-meetings-4f9c2b1e8d7a",
+          title: "Pricing review",
+          occurred_at: "2026-01-04T15:00:00.000Z",
+          source: "zoom-vtt",
+          visibility: "queryable",
+          transcript: "Alice: we agreed to hold at $9 a month...",
+          participants: ["Alice", "Bob"],
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Meeting memory isolation scope" },
+            title: { type: "string", description: "Human-readable meeting title" },
+            occurred_at: { type: "string", description: "ISO-8601 time the meeting happened" },
+            source: { type: "string", description: "Where the transcript came from (zoom-vtt, otter, granola, slipbox...)" },
+            visibility: {
+              type: "string",
+              description:
+                'Required choice. "queryable" = plaintext transcript, searchable, readable by this service. "private" (default) = ciphertext you encrypted, never searchable. Sending the wrong field for the mode is refused rather than guessed.',
+            },
+            transcript: { type: "string", description: 'Plaintext. Only with visibility "queryable"' },
+            ciphertext: { type: "string", description: 'Client-side encrypted. Only with visibility "private"' },
+            alg: { type: "string", description: "Encryption algorithm label for private meetings" },
+            participants: { type: "array", description: "Optional list of attendees" },
+            namespace_token: { type: "string", description: "Required once the namespace has been claimed" },
+          },
+          required: ["namespace"],
+        },
+        output: {
+          example: {
+            status: "imported",
+            meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
+            visibility: "queryable",
+            searchable: true,
+            size_bytes: 4820,
+          },
+        },
+      }),
+    },
+    "/meetings/search": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.006",
+      },
+      description:
+        "Full-text search across your queryable meetings. Returns ranked excerpts, and reports how many meetings were private and therefore not searched.",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          namespace: "my-meetings-4f9c2b1e8d7a",
+          namespace_token: "the token returned by your first import",
+          query: "pricing",
+          limit: 10,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Meeting memory isolation scope" },
+            namespace_token: { type: "string", description: "One-time token issued when the namespace was claimed" },
+            query: { type: "string", description: 'FTS5 match expression. Quote phrases: "budget review"' },
+            limit: { type: "number", description: "Max results, 1-50 (default 10)" },
+          },
+          required: ["namespace", "namespace_token", "query"],
+        },
+        output: {
+          example: {
+            status: "ok",
+            query: "pricing",
+            count: 1,
+            matches: [
+              {
+                meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
+                title: "Pricing review",
+                excerpt: "we agreed to hold at [pricing] of $9 a month…",
+              },
+            ],
+            searched_meetings: 12,
+            private_meetings_skipped: 3,
+          },
+        },
+      }),
+    },
+    "/meetings/get": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.002",
+      },
+      description:
+        "Fetch one meeting in full, by meeting_id (requires the namespace_token)",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          namespace: "my-meetings-4f9c2b1e8d7a",
+          namespace_token: "the token returned by your first import",
+          meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Meeting memory isolation scope" },
+            namespace_token: { type: "string", description: "One-time token issued when the namespace was claimed" },
+            meeting_id: { type: "string", description: "Returned by /meetings/import" },
+          },
+          required: ["namespace", "namespace_token", "meeting_id"],
+        },
+        output: {
+          example: {
+            status: "ok",
+            meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
+            title: "Pricing review",
+            visibility: "queryable",
+            transcript: "Alice: we agreed to hold at $9 a month...",
+          },
+        },
+      }),
+    },
+    "/meetings/list": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.001",
+      },
+      description:
+        "List the meetings in a namespace with their metadata, newest first. Never returns transcripts (requires the namespace_token)",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          namespace: "my-meetings-4f9c2b1e8d7a",
+          namespace_token: "the token returned by your first import",
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Meeting memory isolation scope" },
+            namespace_token: { type: "string", description: "One-time token issued when the namespace was claimed" },
+            limit: { type: "number", description: "Max results, 1-500 (default 100)" },
+          },
+          required: ["namespace", "namespace_token"],
+        },
+        output: {
+          example: {
+            status: "ok",
+            count: 1,
+            meetings: [
+              {
+                meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
+                title: "Pricing review",
+                visibility: "queryable",
+                searchable: true,
+              },
+            ],
+          },
+        },
+      }),
+    },
+    "/meetings/delete": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.001",
+      },
+      description:
+        "Delete a meeting and remove it from the search index (requires the namespace_token)",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          namespace: "my-meetings-4f9c2b1e8d7a",
+          namespace_token: "the token returned by your first import",
+          meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Meeting memory isolation scope" },
+            namespace_token: { type: "string", description: "One-time token issued when the namespace was claimed" },
+            meeting_id: { type: "string", description: "Returned by /meetings/import" },
+          },
+          required: ["namespace", "namespace_token", "meeting_id"],
+        },
+        output: {
+          example: {
+            status: "deleted",
+            meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
           },
         },
       }),

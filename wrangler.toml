@@ -75,6 +75,12 @@ class_name = "Credits"
 name = "STATS"
 class_name = "Stats"
 
+# One Durable Object per meeting-memory namespace. Transcripts are large and
+# searched with FTS5, which wants them co-located with the index.
+[[durable_objects.bindings]]
+name = "MEETINGS"
+class_name = "MeetingMemory"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["OnceKey"]
@@ -90,6 +96,10 @@ new_sqlite_classes = ["Credits"]
 [[migrations]]
 tag = "v4"
 new_sqlite_classes = ["Stats"]
+
+[[migrations]]
+tag = "v5"
+new_sqlite_classes = ["MeetingMemory"]
 
 # ── Rate Limiting ──────────────────────────────────────────────────
 # Per-Cloudflare-location limits. Free endpoints are the abuse surface,
@@ -178,9 +188,20 @@ class_name = "Credits"
 name = "STATS"
 class_name = "Stats"
 
+# durable_objects is NOT inherited from the top level by environments, so a
+# class added above is missing here and every call to it fails at runtime with
+# no config error. Add new Durable Objects in BOTH places.
+[[env.testnet.durable_objects.bindings]]
+name = "MEETINGS"
+class_name = "MeetingMemory"
+
 [[env.testnet.migrations]]
 tag = "v1"
 new_sqlite_classes = ["OnceKey", "Vault", "Credits", "Stats"]
+
+[[env.testnet.migrations]]
+tag = "v2"
+new_sqlite_classes = ["MeetingMemory"]
 
 [[env.testnet.ratelimits]]
 name = "FREE_RATE_LIMITER"

@@ -48,6 +48,89 @@ const NAMESPACE_TOKEN = str(
 
 const TOOLS: ToolDef[] = [
   {
+    name: "meetings_search",
+    title: "Search your meeting transcripts",
+    description:
+      "Ask a question across every meeting you have imported as queryable, and get back ranked excerpts with the meeting they came from. This is the tool to use when the user refers to something that was said, agreed, or decided in a call -- 'what did we decide about pricing', 'who owned the migration', 'when did we say we would ship'. Returns 'searched_meetings' and 'private_meetings_skipped': meetings imported as private are encrypted and CANNOT be searched, so if searched_meetings is 0 an empty result means nothing was searched, NOT that the topic was never discussed. Use meetings_get to read a full transcript once you have found the right meeting.",
+    path: "/meetings/search",
+    price: "$0.006",
+    inputSchema: {
+      type: "object",
+      properties: {
+        namespace: str("Isolation scope holding your meetings"),
+        namespace_token: NAMESPACE_TOKEN,
+        query: str(
+          'FTS5 match expression. Use quotes for phrases, e.g. "budget review". Prefer a few distinctive words over a whole sentence.',
+        ),
+        limit: { type: "integer", description: "Max results, 1-50 (default 10)" },
+      },
+      required: ["namespace", "namespace_token", "query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "meetings_import",
+    title: "Import a meeting transcript",
+    description:
+      "Store a transcript so it can be searched later. `visibility` is a required decision and cannot be guessed for you: 'queryable' stores plaintext, indexes it, and means this service can read it; 'private' stores ciphertext you encrypted yourself, which is unreadable here and therefore NEVER searchable. Send `transcript` for queryable and `ciphertext` for private -- the mismatched combinations are refused rather than silently doing the wrong thing. The first import into a namespace returns a namespace_token shown exactly once; save it or the namespace is unrecoverable.",
+    path: "/meetings/import",
+    price: "$0.004",
+    inputSchema: {
+      type: "object",
+      properties: {
+        namespace: str("Isolation scope, e.g. my-meetings-<uuid>"),
+        namespace_token: NAMESPACE_TOKEN,
+        title: str("Human-readable meeting title"),
+        occurred_at: str("ISO-8601 time the meeting happened"),
+        source: str("Where the transcript came from, e.g. zoom-vtt, otter, granola, slipbox"),
+        visibility: str(
+          "'queryable' (plaintext, searchable, readable by this service) or 'private' (ciphertext, never searchable). Defaults to private.",
+        ),
+        transcript: str("Plaintext transcript. Only valid with visibility 'queryable'."),
+        ciphertext: str("Client-side encrypted transcript. Only valid with visibility 'private'."),
+        participants: { type: "array", items: { type: "string" }, description: "Optional attendees" },
+      },
+      required: ["namespace"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "meetings_get",
+    title: "Read one meeting in full",
+    description:
+      "Fetch a single meeting by meeting_id, including its full transcript when it was imported as queryable. Use this after meetings_search has identified the meeting you want. A 'content_missing' status means the record exists but its stored text could not be found -- that is a broken record, not an empty meeting, so do not report it as one.",
+    path: "/meetings/get",
+    price: "$0.002",
+    inputSchema: {
+      type: "object",
+      properties: {
+        namespace: str("Isolation scope holding your meetings"),
+        namespace_token: NAMESPACE_TOKEN,
+        meeting_id: str("Returned by meetings_import or meetings_search"),
+      },
+      required: ["namespace", "namespace_token", "meeting_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "meetings_list",
+    title: "List your meetings",
+    description:
+      "List the meetings in a namespace newest first, with titles, dates, participants and whether each one is searchable. Never returns transcripts. Useful for orienting before a search, and for finding meetings that are private and therefore invisible to meetings_search.",
+    path: "/meetings/list",
+    price: "$0.001",
+    inputSchema: {
+      type: "object",
+      properties: {
+        namespace: str("Isolation scope holding your meetings"),
+        namespace_token: NAMESPACE_TOKEN,
+        limit: { type: "integer", description: "Max results, 1-500 (default 100)" },
+      },
+      required: ["namespace", "namespace_token"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "once_key_claim",
     title: "Claim an action exactly once",
     description:
