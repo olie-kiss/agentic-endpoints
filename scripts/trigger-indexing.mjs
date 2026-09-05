@@ -1,18 +1,6 @@
-/**
- * Trigger PayAI Bazaar indexing without spending anything.
- *
- * PayAI catalogues a resource when it sees the Bazaar metadata on /verify,
- * not only on /settle. So a payment attempt that is well-formed but cannot
- * possibly succeed is enough to get listed.
- *
- * This signs an EIP-3009 authorization with a freshly generated key that has
- * never held funds. Verification fails on insufficient balance, no
- * transaction is broadcast, and nothing is spent. The signature authorizes a
- * transfer to your own payTo address, so it is worthless to anyone else.
- *
- *   node scripts/trigger-indexing.mjs [baseUrl]
- */
 import { privateKeyToAccount } from "viem/accounts";
+import { createPublicClient, http as viemHttp, formatUnits } from "viem";
+import { base, baseSepolia } from "viem/chains";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
 import { ExactEvmScheme } from "@x402/evm/exact/client";
 import { toClientEvmSigner } from "@x402/evm";
@@ -131,10 +119,68 @@ if (!key) {
 const account = privateKeyToAccount(key);
 console.log(`Payer: ${account.address}\n`);
 
+/**
+ * Refuse to start unless the wallet can cover the whole run.
+ *
+ * Every route is announced by a payment that settles, so a wallet that runs
+ * dry midway leaves the catalogue half-populated: the routes before the last
+ * successful payment are listed, the rest are not, and nothing in the output
+ * distinguishes "not announced yet" from "announced and later dropped". The
+ * failure is also expensive to diagnose, because a re-run re-pays for every
+ * route that already succeeded. Checking the balance once, up front, turns a
+ * partial spend into a refusal that costs nothing.
+ */
+const USDC = TESTNET
+  ? "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+  : "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+
+try {
+  const balance = await createPublicClient({
+    chain: TESTNET ? baseSepolia : base,
+    transport: viemHttp(),
+  }).readContract({
+    address: USDC,
+    abi: [
+      {
+        name: "balanceOf",
+        type: "function",
+        stateMutability: "view",
+        inputs: [{ name: "account", type: "address" }],
+        outputs: [{ name: "", type: "uint256" }],
+      },
+    ],
+    functionName: "balanceOf",
+    args: [account.address],
+  });
+
+  const usdc = Number(formatUnits(balance, 6));
+  console.log(`Balance: $${usdc.toFixed(6)} USDC on ${TESTNET ? "Base Sepolia" : "Base"}\n`);
+
+  if (usdc < budget) {
+    console.error(
+      `Balance $${usdc.toFixed(6)} does not cover the $${budget.toFixed(3)} this run costs.\n\n` +
+        `Send USDC to ${account.address} on ${TESTNET ? "Base Sepolia" : "Base"} and re-run.\n` +
+        "Refusing to start rather than announce some routes and not others.",
+    );
+    process.exit(1);
+  }
+} catch (err) {
+  // A balance that cannot be read is not a balance of zero. Failing open here
+  // would spend real money on the strength of a network error, so this stops
+  // and says which of the two happened.
+  console.error(
+    `Could not read the USDC balance for ${account.address}: ${err.message}\n\n` +
+      "This is a check failure, not an empty wallet. Refusing to spend until\n" +
+      "the balance is known. Re-run when the RPC is reachable.",
+  );
+  process.exit(1);
+}
+
 // Spend controls default to a $1 cap, which silently refuses to announce the
-// $5 and $25 credit packs. Disabled here because the signer is a throwaway key
-// that is never funded: every payment is expected to fail on balance, and the
-// announcement is the only purpose.
+// $5 and $25 credit packs. Disabled here because the preflight check above
+// has already bounded the spend: it refuses to start unless the balance
+// covers the printed budget, and the wallet is a throwaway funded with only
+// what this run costs. That bound is the real spend control.
 const client = x402Client.fromConfig({
   schemes: [{ network: BASE, client: new ExactEvmScheme(toClientEvmSigner(account)) }],
   spendControls: false,
