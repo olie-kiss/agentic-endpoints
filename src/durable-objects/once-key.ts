@@ -3,6 +3,7 @@ import type { Env } from "../types";
 import {
   generateToken,
   hashToken,
+  newNamespaceError,
   normalizeTtl,
   timingSafeEqual,
 } from "../lib/utils";
@@ -173,6 +174,7 @@ export class OnceKey extends DurableObject<Env> {
 
     const body = await request.json<{
       action_key: string;
+      namespace?: string;
       payload_sha256?: string;
       namespace_token?: string;
       ttl?: number;
@@ -202,6 +204,23 @@ export class OnceKey extends DurableObject<Env> {
     this.ensureTable();
 
     if (!(await this.isAuthorized(body.namespace_token))) {
+      /**
+       * The free lifecycle actions must not distinguish "wrong token" from
+       * "never claimed": the pair is an unauthenticated, unmetered oracle for
+       * which namespace names are in use, which is exactly the reconnaissance
+       * step before squatting one. `claim` still answers 403, because probing
+       * it costs the attacker a payment per guess.
+       */
+      if (action !== "claim") {
+        return Response.json(
+          {
+            error: "No live claim for this action_key.",
+            detail:
+              "It was never claimed, was released, its ttl elapsed, or the namespace_token does not match this namespace.",
+          },
+          { status: 404 },
+        );
+      }
       return Response.json(
         { error: "Invalid or missing namespace_token for this namespace" },
         { status: 403 },
@@ -223,14 +242,28 @@ export class OnceKey extends DurableObject<Env> {
     let issuedToken: string | undefined;
     if (this.getOwnerHash() === null) {
       if (action !== "claim") {
+        // Must be byte-identical to the unauthorized 404 above, or the detail
+        // string reinstates the existence oracle it was written to remove.
         return Response.json(
           {
             error: "No live claim for this action_key.",
             detail:
-              "This namespace has no claims. Claim an action_key before completing or releasing it.",
+              "It was never claimed, was released, its ttl elapsed, or the namespace_token does not match this namespace.",
           },
           { status: 404 },
         );
+      }
+
+      // Only enforced for names that do not exist yet, so already-claimed
+      // namespaces keep working.
+      if (body.namespace) {
+        const invalid = newNamespaceError(body.namespace);
+        if (invalid) {
+          return Response.json(
+            { error: "Namespace too guessable", detail: invalid },
+            { status: 400 },
+          );
+        }
       }
 
       const token = generateToken();

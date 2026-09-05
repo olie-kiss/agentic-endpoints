@@ -121,3 +121,86 @@ describe("internal dispatch marker", () => {
     expect(GATED).toContain(res.status);
   });
 });
+
+import { newNamespaceError, MIN_NAMESPACE_LENGTH } from "../src/lib/utils";
+import { redactUrls } from "../src/index";
+
+/**
+ * Namespaces are first-come, global, and unrecoverable, so a guessable name is
+ * a standing denial-of-service: $0.001 claims `invoices` forever and locks out
+ * the integrator who would naturally pick it. Publishing the source makes that
+ * obvious rather than obscure, so new namespaces must be unguessable.
+ */
+describe("new namespace names must be unguessable", () => {
+  const squattable = [
+    "invoices",
+    "billing",
+    "stripe",
+    "orders",
+    "payments",
+    "prod",
+    "default",
+    "test",
+    "my-app",
+  ];
+
+  for (const name of squattable) {
+    it(`rejects "${name}"`, () => {
+      expect(newNamespaceError(name)).toBeTruthy();
+    });
+  }
+
+  it("rejects a long but single-class name", () => {
+    expect("averyveryverylongname".length).toBeGreaterThan(MIN_NAMESPACE_LENGTH);
+    expect(newNamespaceError("averyveryverylongname")).toBeTruthy();
+  });
+
+  it("accepts a random namespace", () => {
+    expect(newNamespaceError(`myapp-${crypto.randomUUID()}`)).toBeNull();
+  });
+
+  it("suggests a concrete replacement rather than just refusing", () => {
+    expect(newNamespaceError("invoices")).toContain("myapp-");
+  });
+});
+
+describe("redactUrls", () => {
+  it("keeps the host but drops any credential in the path or query", () => {
+    expect(redactUrls("failed: https://rpc.example.com/v2/SECRET_KEY timed out"))
+      .toBe("failed: rpc.example.com timed out");
+    expect(redactUrls("https://rpc.example.com/?apikey=abc123")).toBe(
+      "rpc.example.com",
+    );
+  });
+
+  it("passes through null and text without URLs", () => {
+    expect(redactUrls(null)).toBeNull();
+    expect(redactUrls("all endpoints failed")).toBe("all endpoints failed");
+  });
+});
+
+describe("request body cap", () => {
+  /**
+   * The cap trusted a declared Content-Length, so a chunked request skipped it
+   * entirely while every handler still buffered the whole body.
+   */
+  it("rejects an oversized body sent without a Content-Length", async () => {
+    const oversized = new ReadableStream({
+      start(controller) {
+        const chunk = new Uint8Array(256 * 1024);
+        for (let i = 0; i < 12; i++) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+
+    const res = await SELF.fetch("https://ai.oliverkiss.com/compress", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: oversized,
+      // @ts-expect-error duplex is required for a streaming body
+      duplex: "half",
+    });
+
+    expect(res.status).toBe(413);
+  });
+});

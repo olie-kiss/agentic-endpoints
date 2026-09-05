@@ -40,6 +40,7 @@ app.post("/store", async (c) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         key: body.key,
+        namespace: body.namespace,
         ciphertext: body.ciphertext,
         alg: body.alg,
         ttl: body.ttl,

@@ -243,6 +243,22 @@ describe("OnceKey release", () => {
     const n = ns();
     await open(n);
     const res = await call(n, "release", { action_key: "seed" });
-    expect(res.status).toBe(403);
+
+    // 404, not 403: the free lifecycle actions deliberately do not reveal
+    // whether a namespace exists, because that is a free oracle telling a
+    // squatter which names are worth claiming. The claim action still
+    // answers 403, where each probe costs a payment.
+    expect(res.status).toBe(404);
+  });
+
+  it("is indistinguishable from an unclaimed namespace", async () => {
+    const claimed = ns();
+    await open(claimed);
+
+    const wrongToken = await call(claimed, "release", { action_key: "seed" });
+    const neverClaimed = await call(ns(), "release", { action_key: "seed" });
+
+    expect(wrongToken.status).toBe(neverClaimed.status);
+    expect(wrongToken.json).toEqual(neverClaimed.json);
   });
 });

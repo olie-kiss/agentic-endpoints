@@ -383,7 +383,7 @@ namespace must present it.
 
 ```json
 POST /vault/store
-{ "namespace": "my-app", "key": "secret-1", "ciphertext": "base64...", "ttl": 86400 }
+{ "namespace": "my-app-4f9c2b1e8d7a", "key": "secret-1", "ciphertext": "base64...", "ttl": 86400 }
 
 // First write only — save this, it is not shown again
 { "status": "stored", "namespace_token": "30ab4b26..." }
@@ -391,7 +391,7 @@ POST /vault/store
 
 ```json
 POST /vault/retrieve
-{ "namespace": "my-app", "key": "secret-1", "namespace_token": "30ab4b26..." }
+{ "namespace": "my-app-4f9c2b1e8d7a", "key": "secret-1", "namespace_token": "30ab4b26..." }
 ```
 
 Writes are last-write-wins unless you say otherwise, so two agents rotating
@@ -430,15 +430,34 @@ Paid requests are not rate limited — each one already costs the caller USDC.
   response bodies bounded. It fails closed.
 - **Vault and OnceKey namespaces are ownership-gated.** The first request to a
   namespace is issued a one-time `namespace_token`; tokens are stored only as
-  SHA-256 hashes and compared in constant time. Vault tokens can be rotated;
-  OnceKey tokens cannot yet.
+  SHA-256 hashes and compared in constant time.
+- **New namespaces must be unguessable** (16+ characters, mixed character
+  classes). Ownership is first-writer-wins over a global, account-less string
+  and there is deliberately no recovery path, so a short name like `invoices`
+  or `billing` could be claimed by anyone for $0.001 and would lock out the
+  rightful owner permanently. Making real namespaces unguessable means there
+  is nothing worth squatting. Use `myapp-<uuid>`. Names claimed before this
+  rule keep working.
+- **The free lifecycle endpoints do not reveal whether a namespace exists.**
+  `/once-key/complete` and `/once-key/release` return an identical 404 whether
+  the namespace was never claimed or your token is wrong, because a free
+  existence oracle is the reconnaissance step before squatting. `/once-key`
+  itself still answers 403, where each probe costs a payment.
+- **`namespace_token` is a bearer credential with no recovery path.** Anyone
+  holding it *is* the owner. Worse than a normal leak: `/vault/rotate-token`
+  is free and needs only the current token, so whoever steals it can rotate
+  first and lock you out irreversibly. OnceKey has no rotation at all, so a
+  leaked OnceKey token is permanent. There are no accounts, no email, and no
+  support channel that can restore access — treat these tokens like a private
+  key, and store them before you make the call that returns one.
 - **The vault cannot read your values, but it does see their names.** No key
   held here can decrypt anything, and plaintext is never received. But the
   item key, the namespace, the `alg` label and the size are all stored in the
   clear, so the service can tell *which* named secrets you hold and how large
   they are. `alg` is an advisory label: nothing here can verify that what you
   sent was in fact encrypted. Use high-entropy namespace names — ownership is
-  first-writer-wins, so a guessable namespace can be squatted.
+  first-writer-wins, so a guessable namespace can be squatted (now enforced;
+  see above).
 - **Paid routes answer completed work with 200 and a `status` field**, never a
   4xx. The x402 middleware cancels settlement above 399, so a 4xx returned
   after the work is done gives the answer away free and leaves the payment

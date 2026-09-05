@@ -121,3 +121,34 @@ export function normalizeTtl(
   }
   return { ok: true, value: ttl };
 }
+
+/**
+ * Namespaces are claimed first-writer-wins over a caller-supplied string,
+ * globally, with no accounts and — by design — no recovery. That makes a
+ * short, guessable name a standing denial-of-service: for $0.001 anyone can
+ * claim `invoices`, `billing`, `stripe` or `prod` and permanently lock out
+ * the integrator who would naturally reach for that name first. Publishing
+ * the source turns that from obscure to obvious.
+ *
+ * The defence is to make real namespaces unguessable, so there is nothing to
+ * squat. Enforced only when a namespace is first created: names already
+ * claimed keep working.
+ */
+export const MIN_NAMESPACE_LENGTH = 16;
+
+export function newNamespaceError(namespace: string): string | null {
+  if (namespace.length < MIN_NAMESPACE_LENGTH) {
+    return `A new namespace must be at least ${MIN_NAMESPACE_LENGTH} characters. Namespaces are first-come and cannot be recovered, so a guessable name can be claimed by someone else before you. Use a random one, e.g. "myapp-${crypto.randomUUID()}".`;
+  }
+
+  // Length alone is satisfiable by a long dictionary phrase, which is still
+  // guessable. Require a mix of character classes as a cheap entropy floor.
+  const classes = [/[a-z]/, /[A-Z0-9]/, /[-_.:]/].filter((re) =>
+    re.test(namespace),
+  ).length;
+  if (classes < 2) {
+    return `A new namespace needs more variety than lowercase letters alone — mix in digits or a separator. Use a random name, e.g. "myapp-${crypto.randomUUID()}".`;
+  }
+
+  return null;
+}

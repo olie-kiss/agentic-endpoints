@@ -30,6 +30,7 @@ async function forward(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        namespace: body.namespace,
         action_key: body.action_key,
         payload_sha256: body.payload_sha256,
         namespace_token: body.namespace_token,

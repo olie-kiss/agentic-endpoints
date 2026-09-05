@@ -3,6 +3,7 @@ import type { Env } from "../types";
 import {
   generateToken,
   hashToken,
+  newNamespaceError,
   normalizeTtl,
   timingSafeEqual,
 } from "../lib/utils";
@@ -175,6 +176,7 @@ export class Vault extends DurableObject<Env> {
   private async handleStore(request: Request): Promise<Response> {
     const body = await request.json<{
       key: string;
+      namespace?: string;
       ciphertext: string;
       alg?: string;
       ttl?: number;
@@ -257,6 +259,19 @@ export class Vault extends DurableObject<Env> {
     // do not own, locking out its rightful owner with no recovery path.
     let issuedToken: string | undefined;
     if (this.getOwnerHash() === null) {
+      // Only enforced for names that do not exist yet, so already-claimed
+      // namespaces keep working. A guessable name is squattable, and a
+      // squatted vault namespace is unrecoverable by design.
+      if (body.namespace) {
+        const invalid = newNamespaceError(body.namespace);
+        if (invalid) {
+          return Response.json(
+            { error: "Namespace too guessable", detail: invalid },
+            { status: 400 },
+          );
+        }
+      }
+
       const token = generateToken();
       const hash = await hashToken(token);
 

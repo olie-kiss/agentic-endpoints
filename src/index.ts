@@ -48,7 +48,13 @@ export { Stats } from "./durable-objects/stats";
 const app = new Hono<{ Bindings: Env; Variables: { dispatch: Dispatcher } }>();
 
 // ── Global middleware ─────────────────────────────────────────────
-app.use("*", cors());
+/**
+ * Wildcard CORS is deliberate: agents call this from anywhere and there is no
+ * ambient credential to protect. `credentials` is pinned off explicitly so
+ * that a future change cannot quietly pair a wildcard origin with cookies —
+ * the combination that turns an open API into a CSRF target.
+ */
+app.use("*", cors({ origin: "*", credentials: false }));
 
 /**
  * Reject oversized request bodies before anything tries to buffer them.
@@ -250,6 +256,27 @@ app.get("/status", async (c) => {
   return c.json(await statsStub(c.env).slo());
 });
 
+/**
+ * Strip everything but the host from any URL in a string before it is served
+ * publicly.
+ *
+ * `/revenue` publishes the watcher's last error verbatim. Today `rpc()` only
+ * ever interpolates `new URL(url).host`, so nothing sensitive reaches it —
+ * but a BASE_RPC_URL with an API key in its path or query is a common way to
+ * buy Base RPC capacity, and one careless edit upstream would publish it.
+ * Redacting at the boundary means that edit can never leak the key.
+ */
+export function redactUrls(text: string | null): string | null {
+  if (text === null) return null;
+  return text.replace(/\bhttps?:\/\/[^\s,;)]+/gi, (match) => {
+    try {
+      return new URL(match).host;
+    } catch {
+      return "[redacted]";
+    }
+  });
+}
+
 app.get("/revenue", async (c) => {
   const state = await readState(c.env);
 
@@ -271,7 +298,7 @@ app.get("/revenue", async (c) => {
       last_run_at: state.lastRunAt,
       last_success_at: state.lastSuccessAt,
       consecutive_failures: state.consecutiveFailures,
-      last_error: state.lastError,
+      last_error: redactUrls(state.lastError),
     },
     explorer: `https://basescan.org/address/${c.env.X402_PAY_TO}`,
   });
@@ -386,7 +413,7 @@ function buildRoutes(env: Env): RoutesConfig {
         output: {
           example: {
             status: "claimed",
-            namespace: "my-app",
+            namespace: "my-app-4f9c2b1e8d7a",
             action_key: "order-12345",
             claimed_at: "2026-01-01T00:00:00.000Z",
             lease_expires_at: "2026-01-01T00:05:00.000Z",
@@ -556,7 +583,7 @@ function buildRoutes(env: Env): RoutesConfig {
         output: {
           example: {
             status: "stored",
-            namespace: "my-app",
+            namespace: "my-app-4f9c2b1e8d7a",
             key: "secret-1",
             alg: "aes-256-gcm",
             size_bytes: 128,
@@ -599,7 +626,7 @@ function buildRoutes(env: Env): RoutesConfig {
           required: ["namespace", "key", "namespace_token"],
         },
         output: {
-          example: { status: "deleted", namespace: "my-app", key: "secret-1" },
+          example: { status: "deleted", namespace: "my-app-4f9c2b1e8d7a", key: "secret-1" },
         },
       }),
     },
@@ -728,7 +755,7 @@ function buildRoutes(env: Env): RoutesConfig {
           required: ["namespace", "key", "namespace_token"],
         },
         output: {
-          example: { exists: true, namespace: "my-app", key: "secret-1" },
+          example: { exists: true, namespace: "my-app-4f9c2b1e8d7a", key: "secret-1" },
         },
       }),
     },
@@ -768,7 +795,7 @@ function buildRoutes(env: Env): RoutesConfig {
         output: {
           example: {
             status: "retrieved",
-            namespace: "my-app",
+            namespace: "my-app-4f9c2b1e8d7a",
             key: "secret-1",
             ciphertext: "base64-encoded-ciphertext",
             alg: "aes-256-gcm",
@@ -788,6 +815,43 @@ function buildRoutes(env: Env): RoutesConfig {
  * re-enters the pipeline to reach the paid routes; without this the caller
  * would be metered twice for a single tool call.
  */
+/**
+ * Read a request body, giving up as soon as it exceeds `max` bytes.
+ *
+ * Returns null if the cap is passed. Streaming rather than calling
+ * arrayBuffer() and checking afterwards is the whole point: the oversized
+ * body must never be fully resident.
+ */
+async function bufferWithCap(
+  request: Request,
+  max: number,
+): Promise<ArrayBuffer | null> {
+  if (!request.body) return new ArrayBuffer(0);
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out.buffer;
+}
+
 const INTERNAL_HEADER = "X-Internal-Dispatch";
 
 /**
@@ -906,6 +970,29 @@ async function handleRequest(
         },
         { status: 413 },
       );
+    }
+
+    /**
+     * A declared Content-Length is a claim, not a measurement. A chunked
+     * request omits it entirely and skipped the cap above, and every handler
+     * buffers the whole body — so the only real limit was the runtime's.
+     *
+     * When the header is absent the body is streamed and counted, aborting as
+     * soon as the cap is passed rather than buffering first and measuring
+     * afterwards, which would be the same exhaustion by another route.
+     */
+    if (!declared && request.body && request.method !== "GET" && request.method !== "HEAD") {
+      const buffered = await bufferWithCap(request, MAX_BODY_BYTES);
+      if (buffered === null) {
+        return Response.json(
+          {
+            error: "Request body too large",
+            detail: `Maximum body size is ${MAX_BODY_BYTES} bytes.`,
+          },
+          { status: 413 },
+        );
+      }
+      request = new Request(request, { body: buffered });
     }
 
     /**

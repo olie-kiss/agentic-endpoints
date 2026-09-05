@@ -341,9 +341,20 @@ app.get("/", (c) =>
 
 app.post("/", async (c) => {
   /**
-   * DNS-rebinding defence required by the transport spec. A remote server on
-   * a public domain is a weaker target than a localhost one, but a browser
-   * page must still not be able to drive this endpoint from another origin.
+   * Origin sanity check. Note what this does NOT do: it accepts any `https:`
+   * origin, so it is not a DNS-rebinding or CSRF defence, and the comment
+   * that once claimed otherwise was wrong. `app.use("*", cors())` also serves
+   * a wildcard `Access-Control-Allow-Origin`, so any page can reach this
+   * endpoint by design — MCP clients are not all same-origin.
+   *
+   * That is currently safe for exactly one reason: there is no ambient
+   * credential. Every secret here (X-PAYMENT, namespace tokens, credit
+   * tokens) is an explicit header the attacking page would already have to
+   * possess, and none is a cookie the browser attaches automatically.
+   *
+   * If a cookie, a session, or any IP-derived trust is ever introduced, this
+   * becomes a real CSRF surface and must be tightened to a same-origin or
+   * explicit allowlist check first.
    */
   const origin = c.req.header("Origin");
   if (origin) {
