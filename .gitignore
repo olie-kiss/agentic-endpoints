@@ -11,3 +11,5 @@ dist/
 
 # Throwaway Base Sepolia key used only to prove settlement. Never commit.
 .testnet-wallet
+.mainnet-wallet
+*.wallet
