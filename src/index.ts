@@ -277,9 +277,57 @@ export function redactUrls(text: string | null): string | null {
   });
 }
 
+/**
+ * Runs background work without letting a failure disappear.
+ *
+ * `ctx.waitUntil` keeps the isolate alive until the promise settles but does
+ * nothing with a rejection, and wrapping the `waitUntil` call in try/catch
+ * only guards building the promise, not settling it. Every background failure
+ * here was therefore invisible: stats that were never recorded looked exactly
+ * like stats that were.
+ */
+function background(
+  ctx: ExecutionContext,
+  label: string,
+  work: Promise<unknown>,
+): void {
+  ctx.waitUntil(
+    work.catch((err: unknown) => {
+      console.error(`Background task failed [${label}]:`, err);
+    }),
+  );
+}
+
+/**
+ * Refunds prepaid credit, and makes a failure loud enough to act on.
+ *
+ * A refund that never lands is money the customer paid for work they did not
+ * receive. Silently dropping it is the worst failure this service has, because
+ * from the outside it is identical to a refund that succeeded — nobody finds
+ * out, including us. The log line carries everything needed to replay the
+ * refund by hand: `tokenHash` is the ledger's own key, and it is a SHA-256 of
+ * the token rather than the token itself, so it is safe to record.
+ */
+function refundCredit(
+  ctx: ExecutionContext,
+  account: ReturnType<typeof creditsStub>,
+  tokenHash: string,
+  priceMicros: number,
+  reason: string,
+): void {
+  ctx.waitUntil(
+    account.refund(tokenHash, priceMicros).catch((err: unknown) => {
+      console.error(
+        `REFUND FAILED reason=${reason} token_sha256=${tokenHash} ` +
+          `micros=${priceMicros} — customer is owed this credit:`,
+        err,
+      );
+    }),
+  );
+}
+
 app.get("/revenue", async (c) => {
   const state = await readState(c.env);
-
   return c.json({
     address: c.env.X402_PAY_TO,
     asset: "USDC",
@@ -1208,7 +1256,7 @@ async function spendCredits(
     response = await app.fetch(request, env, ctx);
   } catch (err) {
     console.error("Credit-funded request threw, refunding:", err);
-    ctx.waitUntil(account.refund(tokenHash, priceMicros));
+    refundCredit(ctx, account, tokenHash, priceMicros, "handler_threw");
     throw err;
   }
 
@@ -1224,7 +1272,13 @@ async function spendCredits(
   // whichever way it was paid for, and abusive volume is a rate-limiting
   // problem, which is handled before any of this.
   if (response.status >= 400) {
-    ctx.waitUntil(account.refund(tokenHash, priceMicros));
+    refundCredit(
+      ctx,
+      account,
+      tokenHash,
+      priceMicros,
+      `status_${response.status}`,
+    );
     return response;
   }
 
@@ -1254,7 +1308,7 @@ async function handleScheduled(
   // Recorded first and unconditionally. A heartbeat written only after a
   // successful revenue scan would turn "the chain RPC is down" into a
   // reported outage of this service.
-  ctx.waitUntil(statsStub(env).heartbeat());
+  background(ctx, "stats heartbeat", statsStub(env).heartbeat());
 
   // The testnet deployment shares production's MONITOR namespace, so a scan
   // from there would advance the real revenue watermark past blocks nobody
@@ -1273,7 +1327,7 @@ async function handleScheduled(
       console.log(
         `Revenue: ${newPayments.length} new payment(s), lifetime $${state.totalUsdc}`,
       );
-      ctx.waitUntil(alert(env, newPayments, state));
+      background(ctx, "payment alert", alert(env, newPayments, state));
     }
   } catch (err) {
     console.error("Revenue scan failed:", err);
@@ -1284,7 +1338,7 @@ async function handleScheduled(
     try {
       const state = await recordFailure(env, err);
       if (shouldAlertOnFailure(state)) {
-        ctx.waitUntil(alertFailure(env, state));
+        background(ctx, "scan-failure alert", alertFailure(env, state));
       }
     } catch (nested) {
       console.error("Could not record revenue scan failure:", nested);
@@ -1394,7 +1448,9 @@ async function withStats(
     const path = new URL(request.url).pathname;
     const counted = classify(path, response.status, isKnownPaidPath(env, path));
     if (counted) {
-      ctx.waitUntil(
+      background(
+        ctx,
+        "record request stats",
         statsStub(env).record(
           counted.bucket,
           counted.outcome,

@@ -128,7 +128,19 @@ export class Credits extends DurableObject<Env> {
   async refund(tokenHash: string, amountMicros: number): Promise<void> {
     this.ensureTable();
     const row = this.row();
-    if (!row || !timingSafeEqual(row.token_hash, tokenHash)) return;
+
+    // Never credit an account on an unverified hash — that would make refunds
+    // a way to mint balance. But do not return quietly either: refund is only
+    // ever called after a charge succeeded against this same hash, so getting
+    // here means either a bug or an attempt to forge one, and the customer is
+    // still holding a charge nobody will reverse. Throwing hands it to the
+    // caller's logging, which records the amount and account for reconciling.
+    if (!row) {
+      throw new Error("Refund rejected: no credit account exists");
+    }
+    if (!timingSafeEqual(row.token_hash, tokenHash)) {
+      throw new Error("Refund rejected: token hash does not match the account");
+    }
 
     this.ctx.storage.sql.exec(
       `UPDATE account

@@ -106,6 +106,62 @@ export class HeldError extends Error {
   }
 }
 
+/**
+ * Our lease lapsed, another caller took the key over, and the side effect ran
+ * twice.
+ *
+ * Only reachable when `leaseTtl` is set and the work outlives it. The take-over
+ * is deliberate — a lease exists so a crashed claimant cannot block a key
+ * forever — but a claimant that was merely slow rather than dead gets taken
+ * over just the same, and by the time it finds out its side effect has already
+ * happened a second time.
+ *
+ * `yourResult` is what your own work returned; `recordedResult` is what the
+ * other caller stored and what every future replayer will receive. Neither is
+ * discarded here, because recovering from a double execution needs both.
+ *
+ * If this fires, raise `leaseTtl` above your worst-case runtime, or drop it so
+ * the key is never reclaimable.
+ */
+export class LeaseLostError<T = unknown> extends Error {
+  constructor(
+    readonly actionKey: string,
+    readonly yourResult: T,
+    readonly recordedResult: unknown,
+    readonly hasRecordedResult: boolean,
+  ) {
+    super(
+      `action_key "${actionKey}" was completed by another caller while your ` +
+        "work was still running, so your lease had lapsed and the side " +
+        "effect has now run twice. The stored result is theirs, not yours. " +
+        "Increase leaseTtl beyond your worst-case runtime, or omit it so the " +
+        "key can never be taken over.",
+    );
+    this.name = "LeaseLostError";
+  }
+}
+
+/**
+ * The action completed, but its stored result cannot be read back.
+ *
+ * Do NOT re-run the work: it definitely happened. What is lost is the record
+ * of what it produced, which is a different failure from never having run and
+ * needs a human rather than a retry.
+ */
+export class ResultUnavailableError extends Error {
+  constructor(
+    readonly actionKey: string,
+    readonly detail: string,
+  ) {
+    super(
+      `action_key "${actionKey}" completed, but its recorded result could ` +
+        `not be read back (${detail}). The work has already happened — do ` +
+        "not repeat it. The stored outcome is lost and needs manual recovery.",
+    );
+    this.name = "ResultUnavailableError";
+  }
+}
+
 export interface ExactlyOnceOptions {
   namespace: string;
   actionKey: string;
@@ -136,6 +192,12 @@ export interface ExactlyOnceResult<T> {
   /** "performed" — you did the work. "replayed" — someone already had. */
   outcome: "performed" | "replayed";
   result: T;
+  /**
+   * False when the action completed but no result was ever recorded, so
+   * `result` is null because there is nothing to replay — not because the
+   * work returned null. Check this before acting on a replayed value.
+   */
+  hasResult: boolean;
   /** Returned only on the very first call in a namespace. Store it. */
   namespaceToken?: string;
 }
@@ -224,6 +286,8 @@ export class AgenticEndpoints {
       const claim = await this.post<{
         status: ClaimStatus;
         result?: T;
+        has_result?: boolean;
+        result_error?: string;
         retry_after?: number;
         expires_at?: string;
         namespace_token?: string;
@@ -251,19 +315,28 @@ export class AgenticEndpoints {
       }
 
       if (claim.status === "duplicate") {
-        // A duplicate is only meaningful if it carries the original outcome.
-        // Returning `undefined` here would tell the caller the action already
-        // succeeded while handing them nothing to act on, which is how a
-        // skipped side effect turns into silent data loss. Fail loudly
-        // instead: this can only happen against a server that recorded a
-        // completion without a result, or an older one that used "duplicate"
-        // for a claim that had not finished.
+        // `has_result` distinguishes "completed, but the caller recorded no
+        // result" from "the result field is missing entirely". The first is a
+        // legitimate outcome for work that returns nothing; the second means
+        // the server is inconsistent and nobody can say what happened.
+        //
+        // Returning `undefined` for either would tell the caller the action
+        // already succeeded while handing them nothing to act on, which is how
+        // a skipped side effect turns into silent data loss.
         if (!("result" in claim)) {
           throw new HeldError(actionKey, claim.expires_at);
+        }
+        // The stored result exists but could not be decoded. That is not an
+        // empty result and must not be replayed as one: the work definitely
+        // ran, so re-running it would double the side effect, while treating
+        // null as its outcome would silently corrupt whatever comes next.
+        if (claim.result_error) {
+          throw new ResultUnavailableError(actionKey, claim.result_error);
         }
         return {
           outcome: "replayed",
           result: claim.result as T,
+          hasResult: claim.has_result !== false,
           namespaceToken: issuedToken,
         };
       }
@@ -298,7 +371,11 @@ export class AgenticEndpoints {
         throw err;
       }
 
-      await this.post("/once-key/complete", {
+      const completion = await this.post<{
+        status?: string;
+        result?: T;
+        has_result?: boolean;
+      }>("/once-key/complete", {
         namespace,
         action_key: actionKey,
         namespace_token: namespaceToken,
@@ -306,7 +383,31 @@ export class AgenticEndpoints {
         ttl,
       });
 
-      return { outcome: "performed", result: value, namespaceToken: issuedToken };
+      // Someone else completed this key while we were working on it. That can
+      // only happen when a leaseTtl was set and the work outran it: another
+      // caller took the claim over, ran the same side effect, and recorded
+      // their outcome. Our work has therefore already run a second time, and
+      // the stored result is theirs, not ours.
+      //
+      // Returning outcome "performed" here would assert both that the action
+      // ran exactly once and that our value is canonical, and neither is true.
+      // This response is the only signal a caller ever gets that a take-over
+      // collided with it, so it must not be discarded.
+      if (completion.status === "already_completed") {
+        throw new LeaseLostError(
+          actionKey,
+          value,
+          completion.result,
+          completion.has_result !== false,
+        );
+      }
+
+      return {
+        outcome: "performed",
+        result: value,
+        hasResult: value !== undefined,
+        namespaceToken: issuedToken,
+      };
     }
   }
 }

@@ -153,12 +153,33 @@ export class OnceKey extends DurableObject<Env> {
     );
   }
 
-  private static parseResult(raw: unknown): unknown {
-    if (typeof raw !== "string") return undefined;
+  /**
+   * Renders a stored result into wire fields that are never ambiguous.
+   *
+   * `result` is always present, so a caller can never confuse "no result was
+   * recorded" with "the field went missing", and `has_result` says which of
+   * those it is. JSON.stringify drops undefined values, so returning a bare
+   * undefined here would silently delete the field from the response — which
+   * is precisely how a completed-but-empty claim used to read as a result of
+   * undefined on the client.
+   */
+  private static resultFields(raw: unknown): Record<string, unknown> {
+    if (typeof raw !== "string") return { result: null, has_result: false };
     try {
-      return JSON.parse(raw);
+      return { result: JSON.parse(raw), has_result: true };
     } catch {
-      return undefined;
+      // Stored JSON that will not parse is corruption, not an empty result.
+      // `has_result` alone cannot carry this: reusing false would make it
+      // identical to the legitimate "completed and recorded nothing" case, so
+      // a caller would skip the side effect and proceed with null while the
+      // real outcome is lost. `result_error` is the distinguishing signal and
+      // clients must treat its presence as an error, not as an empty result.
+      console.error("OnceKey: stored result is not decodable JSON");
+      return {
+        result: null,
+        has_result: false,
+        result_error: "stored result could not be decoded",
+      };
     }
   }
 
@@ -363,7 +384,7 @@ export class OnceKey extends DurableObject<Env> {
           claimed_at: existing.claimed_at,
           completed_at: existing.completed_at ?? null,
           expires_at: existing.expires_at,
-          result: OnceKey.parseResult(existing.result),
+          ...OnceKey.resultFields(existing.result),
           ...ownership,
         });
       }
@@ -485,7 +506,7 @@ export class OnceKey extends DurableObject<Env> {
         action_key: body.action_key,
         completed_at: existing.completed_at ?? null,
         expires_at: existing.expires_at,
-        result: OnceKey.parseResult(existing.result),
+        ...OnceKey.resultFields(existing.result),
         ...ownership,
       });
     }
@@ -525,7 +546,7 @@ export class OnceKey extends DurableObject<Env> {
       action_key: body.action_key,
       completed_at: now.toISOString(),
       expires_at: expiresAt.toISOString(),
-      result: OnceKey.parseResult(serialized),
+      ...OnceKey.resultFields(serialized),
       ...ownership,
     });
   }

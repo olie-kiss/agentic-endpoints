@@ -192,3 +192,97 @@ test("surfaces the x402 challenge from the header, not the empty body", async ()
     },
   );
 });
+
+/**
+ * A server that scripts both /once-key and /once-key/complete, so the
+ * completion branch can be exercised too.
+ */
+function scriptedServer({ claim, complete }) {
+  const ran = { work: 0 };
+  const fetchImpl = async (url, init) => {
+    const path = new URL(url).pathname;
+    if (path === "/once-key") return Response.json(claim);
+    if (path === "/once-key/complete") return Response.json(complete ?? { status: "completed" });
+    return Response.json({ status: "ok" });
+  };
+  return { fetchImpl, ran };
+}
+
+test("a duplicate carrying no result is never reported as success", async () => {
+  const { fetchImpl } = scriptedServer({ claim: { status: "duplicate" } });
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  await assert.rejects(
+    () => client.exactlyOnce(base, async () => "work"),
+    (err) => err.name === "HeldError",
+  );
+});
+
+test("an empty recorded result replays as null, not as an error", async () => {
+  const { fetchImpl } = scriptedServer({
+    claim: { status: "duplicate", result: null, has_result: false },
+  });
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  const res = await client.exactlyOnce(base, async () => "work");
+  assert.equal(res.outcome, "replayed");
+  assert.equal(res.result, null);
+  assert.equal(res.hasResult, false);
+});
+
+test("a corrupted stored result is not replayed as an empty one", async () => {
+  const { fetchImpl } = scriptedServer({
+    claim: {
+      status: "duplicate",
+      result: null,
+      has_result: false,
+      result_error: "stored result could not be decoded",
+    },
+  });
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  await assert.rejects(
+    () => client.exactlyOnce(base, async () => "work"),
+    (err) => err.name === "ResultUnavailableError",
+  );
+});
+
+test("a held key is an error, and the work is never run", async () => {
+  let ran = false;
+  const { fetchImpl } = scriptedServer({
+    claim: { status: "held", expires_at: "2099-01-01T00:00:00.000Z" },
+  });
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  await assert.rejects(
+    () =>
+      client.exactlyOnce(base, async () => {
+        ran = true;
+        return "work";
+      }),
+    (err) => err.name === "HeldError",
+  );
+  assert.equal(ran, false, "the side effect must not run for a held key");
+});
+
+test("losing the lease mid-flight is surfaced, not reported as performed", async () => {
+  const { fetchImpl } = scriptedServer({
+    claim: { status: "claimed" },
+    complete: {
+      status: "already_completed",
+      result: { chargedBy: "B" },
+      has_result: true,
+    },
+  });
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  await assert.rejects(
+    () => client.exactlyOnce(base, async () => ({ chargedBy: "A" })),
+    (err) => {
+      assert.equal(err.name, "LeaseLostError");
+      assert.deepEqual(err.yourResult, { chargedBy: "A" });
+      assert.deepEqual(err.recordedResult, { chargedBy: "B" });
+      return true;
+    },
+  );
+});

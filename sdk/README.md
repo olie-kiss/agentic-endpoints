@@ -50,6 +50,10 @@ the duplicate charge you were paying to avoid.
 | You win the claim | Runs your work, stores the return value, returns `performed` |
 | Your work throws | Releases the claim so a retry can start at once, rethrows your error unchanged |
 | Someone already finished | Never runs your work; returns their result as `replayed` |
+| They finished but recorded no result | Returns `replayed` with `hasResult: false` and `result` null, so an empty result is never mistaken for a lost one |
+| Someone holds it but never finished | Throws `HeldError`. The work may be in flight or may have been abandoned; it is **not** a completed action and must not be treated as one |
+| The stored result cannot be decoded | Throws `ResultUnavailableError`. The work **did** run — do not repeat it — but its recorded outcome is lost |
+| Your lease lapsed and someone took over | Throws `LeaseLostError`. Your side effect has now run twice; carries both your result and the recorded one |
 | Someone is mid-flight | Throws `InProgressError` with `retryAfter`. Pass `waitAttempts` to wait instead |
 | Same key, different inputs | Throws `ConflictError`. Never retryable — your key derivation is wrong |
 

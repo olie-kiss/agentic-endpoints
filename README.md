@@ -314,7 +314,7 @@ POST /once-key
 | `status` | Meaning |
 |---|---|
 | `claimed` | You won. Do the work, then call `/once-key/complete` |
-| `duplicate` | Already done. `result` holds the original outcome — use it |
+| `duplicate` | Already done. `result` holds the original outcome — use it. `has_result` is `false` if the original caller recorded no result, in which case `result` is null because there is nothing to replay |
 | `held` | Claimed by someone who set no lease and never finished. There is **no** result and may never be one. Do **not** do the work and do **not** treat it as done; locked until `expires_at` |
 | `in_progress` | Another caller holds a live lease. Wait `retry_after`; do **not** do the work |
 | `conflict` | Same key, different payload hash. Your key derivation is wrong; never retry |

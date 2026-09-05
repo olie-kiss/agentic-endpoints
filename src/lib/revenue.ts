@@ -159,6 +159,27 @@ function topicToAddress(topic: string): string {
   return `0x${topic.slice(-40)}`;
 }
 
+/**
+ * Parses an Ethereum hex quantity into a safe integer, refusing anything else.
+ *
+ * `Number("0x…")` happily returns NaN for a malformed reply, and NaN then
+ * spreads without ever throwing: every block comparison silently evaluates
+ * false, `toString(16)` produces "nan", and the value persists to the
+ * watermark as null. The monitor would go on reporting healthy sweeps while
+ * quietly detecting no payments at all — the worst possible failure here,
+ * because it is indistinguishable from having made no sales.
+ */
+function hexQuantity(raw: unknown, label: string): number {
+  if (typeof raw !== "string" || !/^0x[0-9a-f]+$/i.test(raw)) {
+    throw new Error(`${label} returned a malformed quantity: ${String(raw)}`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} returned an out-of-range quantity: ${raw}`);
+  }
+  return value;
+}
+
 /** Formats a USDC base-unit amount without going through float parsing. */
 export function formatUsdc(raw: bigint): number {
   const divisor = 10n ** BigInt(USDC_DECIMALS);
@@ -237,7 +258,10 @@ export async function scanForPayments(env: Env): Promise<{
   const state = await readState(env);
   const now = new Date().toISOString();
 
-  const head = Number(await rpc<string>(env, "eth_blockNumber", []));
+  const head = hexQuantity(
+    await rpc<string>(env, "eth_blockNumber", []),
+    "eth_blockNumber",
+  );
   const balance = await fetchBalance(env);
 
   // First run establishes both watermarks and claims nothing. Treating the
@@ -343,7 +367,7 @@ async function describeTransfers(
         from: topicToAddress(log.topics[1]),
         amount: raw.toString(),
         usdc: formatUsdc(raw),
-        block: Number(log.blockNumber),
+        block: hexQuantity(log.blockNumber, "eth_getLogs blockNumber"),
         tx: log.transactionHash,
       };
     });

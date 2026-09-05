@@ -230,6 +230,89 @@ describe("OnceKey leases", () => {
     });
     expect(replay.json.status).toBe("duplicate");
     expect(replay.json.result).toEqual({ charged: true });
+    expect(replay.json.has_result).toBe(true);
+  });
+
+  it("always sends a result field, even when none was recorded", async () => {
+    // Completing without a result is legitimate for work that returns
+    // nothing. What is not legitimate is dropping the field: JSON.stringify
+    // removes undefined, so the replay used to arrive with no `result` key at
+    // all and the caller could not tell an empty result from a lost one.
+    const n = ns();
+    const token = await open(n);
+
+    await call(n, "claim", { action_key: "k", namespace_token: token });
+    await call(n, "complete", { action_key: "k", namespace_token: token });
+
+    const replay = await call(n, "claim", {
+      action_key: "k",
+      namespace_token: token,
+    });
+    expect(replay.json.status).toBe("duplicate");
+    expect(replay.json).toHaveProperty("result");
+    expect(replay.json.result).toBeNull();
+    expect(replay.json.has_result).toBe(false);
+  });
+
+  it("distinguishes a recorded null result from no result at all", async () => {
+    const n = ns();
+    const token = await open(n);
+
+    await call(n, "claim", { action_key: "k", namespace_token: token });
+    await call(n, "complete", {
+      action_key: "k",
+      namespace_token: token,
+      result: null,
+    });
+
+    const replay = await call(n, "claim", {
+      action_key: "k",
+      namespace_token: token,
+    });
+    expect(replay.json.result).toBeNull();
+    expect(replay.json.has_result).toBe(true);
+  });
+
+  it("tells a slow claimant that a take-over already completed its key", async () => {
+    // The double-execution case: A's lease lapses while its work is still
+    // running, B takes the key over and completes it, then A finally reports.
+    // A must be able to see that the recorded result is not its own, because
+    // this is the only signal that the side effect ran twice.
+    const n = ns();
+    const token = await open(n);
+
+    await call(n, "claim", {
+      action_key: "k",
+      namespace_token: token,
+      lease_ttl: 1,
+    });
+
+    // Reclaim with a lapsed lease, standing in for the slow claimant's peer.
+    await new Promise((r) => setTimeout(r, 1100));
+    const takeover = await call(n, "claim", {
+      action_key: "k",
+      namespace_token: token,
+      lease_ttl: 60,
+    });
+    expect(takeover.json.status).toBe("claimed");
+    expect(takeover.json.recovered).toBe(true);
+
+    await call(n, "complete", {
+      action_key: "k",
+      namespace_token: token,
+      result: { chargedBy: "B" },
+    });
+
+    // The original claimant finally finishes and reports its own result.
+    const late = await call(n, "complete", {
+      action_key: "k",
+      namespace_token: token,
+      result: { chargedBy: "A" },
+    });
+
+    expect(late.json.status).toBe("already_completed");
+    expect(late.json.result).toEqual({ chargedBy: "B" });
+    expect(late.json.has_result).toBe(true);
   });
 });
 

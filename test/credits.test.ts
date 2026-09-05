@@ -102,7 +102,15 @@ describe("credit accounts", () => {
     const { stub } = await account("tok-forge");
 
     await runInDurableObject(stub, (i: Credits) => i.spend(tokenHash, 500_000));
-    await runInDurableObject(stub, (i: Credits) => i.refund("f".repeat(64), 500_000));
+
+    // Rejected loudly, not quietly. A forged refund is either an attack or a
+    // bug, and either way it leaves a real charge unreversed, so it must not
+    // be possible for one to pass without anyone noticing.
+    await expect(
+      runInDurableObject(stub, (i: Credits) =>
+        i.refund("f".repeat(64), 500_000),
+      ),
+    ).rejects.toThrow(/does not match/i);
 
     const ledger = await runInDurableObject(stub, (i: Credits) => i.balance(tokenHash));
     expect(ledger?.balance_micros).toBe(500_000);

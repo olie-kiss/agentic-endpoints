@@ -338,6 +338,11 @@ export function buildLlmsTxt(routes: RoutesConfig, origin: string): string {
   lines.push("     `retry_after` seconds; do not start the work.");
   lines.push("   - `duplicate` — already done. The `result` field holds the");
   lines.push("     original outcome; use it and do not repeat the work.");
+  lines.push("     `has_result` is false if no result was ever recorded, so");
+  lines.push("     a null result is never mistaken for a lost one. If");
+  lines.push("     `result_error` is present the stored result could not be");
+  lines.push("     read back: the work DID run, so do not repeat it, but the");
+  lines.push("     recorded outcome is lost.");
   lines.push("   - `held` — someone else claimed it but has not finished and");
   lines.push("     set no lease. There is no result and may never be one. Do");
   lines.push("     NOT treat this as done and do NOT do the work; the key is");
