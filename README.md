@@ -115,11 +115,11 @@ CDP Bazaar is skipped for exactly that reason.
 | x402-list.com | Submitted, pending review | `POST /api/v1/submit`; free because the service is on a custom domain |
 | Official MCP Registry | **Published — `com.oliverkiss/agentic-endpoints`, status active** | `./scripts/publish-registry.sh`. Ownership proven by an apex TXT record and an ed25519-signed timestamp, so no financial account is involved |
 | npm | **Published — [`agentic-endpoints`](https://www.npmjs.com/package/agentic-endpoints)** | `cd sdk && npm publish`. Counts as discovery, not just convenience: npm is crawled by every AI coding assistant, so the client is findable by the same models that would use the service |
-| Smithery | Not yet | `smithery mcp publish https://ai.oliverkiss.com/mcp -n @olie-kiss/agentic-endpoints` (needs a browser login) |
+| Smithery | **Published — [`kiss-olie/agentic-endpoints`](https://smithery.ai/servers/kiss-olie/agentic-endpoints)** | `smithery auth login` then `smithery mcp publish https://ai.oliverkiss.com/mcp -n kiss-olie/agentic-endpoints`. The scan found all 12 tools. Note the namespace is `kiss-olie`, not the GitHub handle. Publishing leaves `description` empty and the CLI has no flag for it, which makes the listing unsearchable — set it with `PATCH https://api.smithery.ai/servers/kiss-olie%2Fagentic-endpoints` |
 
 Aggregators such as PulseMCP ingest from the official registry, so publishing
-there covers several directories at once. Directories that crawl source repos
-see nothing while this repo is private.
+there covers several directories at once. The repository is public, so
+directories that crawl source repos can now see it too.
 
 Machine-readable descriptions are generated from the same pricing table that
 gates payment, so they cannot drift from what is actually charged: `/llms.txt`

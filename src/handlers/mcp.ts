@@ -429,6 +429,14 @@ app.post("/", async (c) => {
           name: "agentic-endpoints",
           title: "Agentic Endpoints",
           version: "1.0.0",
+          // `description` and `websiteUrl` are not in the MCP Implementation
+          // schema, but registries scrape them and an empty description makes
+          // a discovery listing close to useless — Smithery published us with
+          // a blank one because it does not map `instructions`. Additive and
+          // ignored by spec-strict clients.
+          description:
+            "Pay-per-call HTTP and MCP utilities for autonomous AI agents, settled in USDC on Base via the x402 protocol. No signup, no API keys, no subscription — an agent pays per request. Includes exactly-once idempotency claims, an encrypted vault, web scraping, PDF text extraction, and token compression.",
+          websiteUrl: "https://ai.oliverkiss.com",
         },
         instructions:
           "Pay-per-call utilities for autonomous agents, settled in USDC on Base via x402. tools/list is free. Every tool that does work is paid; calling one without payment returns the price and payment address.",
@@ -436,6 +444,19 @@ app.post("/", async (c) => {
 
     case "ping":
       return rpcResult(id, {});
+
+    /**
+     * We advertise no `resources` or `prompts` capability, so a spec-strict
+     * client never calls these and -32601 was a correct answer. Registry
+     * scanners probe them regardless and log the error as a warning against
+     * the listing, so answer with an empty list instead. Costs nothing and
+     * keeps the scan clean.
+     */
+    case "resources/list":
+      return rpcResult(id, { resources: [] });
+
+    case "prompts/list":
+      return rpcResult(id, { prompts: [] });
 
     case "tools/list":
       return rpcResult(id, {
