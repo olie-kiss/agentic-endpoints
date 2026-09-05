@@ -15,6 +15,7 @@
 export type ClaimStatus =
   | "claimed"
   | "duplicate"
+  | "held"
   | "in_progress"
   | "conflict";
 
@@ -72,6 +73,36 @@ export class InProgressError extends Error {
         `Retry in ${retryAfter}s. Do not perform the work.`,
     );
     this.name = "InProgressError";
+  }
+}
+
+/**
+ * The key is claimed by someone who set no lease and never completed.
+ *
+ * This is deliberately an error and not a successful "replayed" result. The
+ * side effect may still be running, or the caller that held the key may have
+ * died part way through it. Nobody can tell which, and there is no result to
+ * return. Reporting it as success would let you skip a charge that never
+ * actually happened.
+ *
+ * Nothing will free the key before `expiresAt`. Recovering from this needs a
+ * decision only you can make: wait, alert a human, or use a `leaseTtl` on
+ * future calls so a dead claimant can be taken over automatically.
+ */
+export class HeldError extends Error {
+  constructor(
+    readonly actionKey: string,
+    readonly expiresAt?: string,
+  ) {
+    super(
+      `action_key "${actionKey}" is held by another caller that set no ` +
+        "lease and has not recorded a result. The work may be in flight or " +
+        "may have been abandoned; this is not a completed action and must " +
+        "not be treated as one. The key stays locked until " +
+        `${expiresAt ?? "its ttl expires"}. Set leaseTtl if this work is ` +
+        "safe to retry after a crash.",
+    );
+    this.name = "HeldError";
   }
 }
 
@@ -194,6 +225,7 @@ export class AgenticEndpoints {
         status: ClaimStatus;
         result?: T;
         retry_after?: number;
+        expires_at?: string;
         namespace_token?: string;
       }>("/once-key", {
         namespace,
@@ -214,7 +246,21 @@ export class AgenticEndpoints {
 
       if (claim.status === "conflict") throw new ConflictError(actionKey);
 
+      if (claim.status === "held") {
+        throw new HeldError(actionKey, claim.expires_at);
+      }
+
       if (claim.status === "duplicate") {
+        // A duplicate is only meaningful if it carries the original outcome.
+        // Returning `undefined` here would tell the caller the action already
+        // succeeded while handing them nothing to act on, which is how a
+        // skipped side effect turns into silent data loss. Fail loudly
+        // instead: this can only happen against a server that recorded a
+        // completion without a result, or an older one that used "duplicate"
+        // for a claim that had not finished.
+        if (!("result" in claim)) {
+          throw new HeldError(actionKey, claim.expires_at);
+        }
         return {
           outcome: "replayed",
           result: claim.result as T,

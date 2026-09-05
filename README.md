@@ -315,6 +315,7 @@ POST /once-key
 |---|---|
 | `claimed` | You won. Do the work, then call `/once-key/complete` |
 | `duplicate` | Already done. `result` holds the original outcome — use it |
+| `held` | Claimed by someone who set no lease and never finished. There is **no** result and may never be one. Do **not** do the work and do **not** treat it as done; locked until `expires_at` |
 | `in_progress` | Another caller holds a live lease. Wait `retry_after`; do **not** do the work |
 | `conflict` | Same key, different payload hash. Your key derivation is wrong; never retry |
 
@@ -325,6 +326,12 @@ POST /once-key/complete          // free
 ```
 
 Every later claim of that key returns `duplicate` **with that result**.
+
+`duplicate` always means *completed*. A claim that was started but never
+completed reports `held` instead, precisely so a caller cannot mistake work
+that is still in flight — or that died half way through — for work that
+succeeded. The SDK raises `HeldError` rather than returning a result of
+`undefined`.
 
 If the work fails, `POST /once-key/release` (free) frees the key immediately.
 

@@ -25,6 +25,21 @@ function ns() {
   return `t-${crypto.randomUUID()}`;
 }
 
+async function complete(
+  namespace: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const stub = env.ONCE_KEY.get(env.ONCE_KEY.idFromName(namespace));
+  const res = await stub.fetch(
+    new Request("https://internal/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+  return { status: res.status, json: await res.json() };
+}
+
 describe("OnceKey namespace ownership", () => {
   it("mints a one-time token on the first claim", async () => {
     const n = ns();
@@ -71,8 +86,17 @@ describe("OnceKey claim semantics", () => {
     const first = await claim(n, { action_key: "k" });
     const token = first.json.namespace_token as string;
 
+    // A duplicate is a *completed* action. Without this the second caller is
+    // holding an unfinished claim, which is "held", not "duplicate".
+    await complete(n, {
+      action_key: "k",
+      namespace_token: token,
+      result: { ok: true },
+    });
+
     const second = await claim(n, { action_key: "k", namespace_token: token });
     expect(second.json.status).toBe("duplicate");
+    expect(second.json.result).toEqual({ ok: true });
     expect(second.json.claimed_at).toBe(first.json.claimed_at);
   });
 

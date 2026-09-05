@@ -54,6 +54,7 @@ export interface ClaimResult {
   status:
     | "claimed"
     | "duplicate"
+    | "held"
     | "conflict"
     | "in_progress"
     | "completed"

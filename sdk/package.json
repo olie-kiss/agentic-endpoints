@@ -1,6 +1,6 @@
 {
   "name": "agentic-endpoints",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Client for agentic-endpoints: run an action exactly once across a fleet of AI agents, paid per call in USDC on Base via x402.",
   "keywords": [
     "x402",

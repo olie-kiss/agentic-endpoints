@@ -191,7 +191,45 @@ describe("OnceKey leases", () => {
       action_key: "k",
       namespace_token: token,
     });
-    expect(second.json.status).toBe("duplicate");
+    expect(second.json.status).toBe("held");
+  });
+
+  it("never reports an unfinished claim as a completed duplicate", async () => {
+    // The dangerous failure this guards against: a caller is told the action
+    // already succeeded, skips its own side effect, and proceeds with no
+    // result — so a charge that never happened looks like one that did.
+    const n = ns();
+    const token = await open(n);
+
+    await call(n, "claim", { action_key: "k", namespace_token: token });
+
+    const second = await call(n, "claim", {
+      action_key: "k",
+      namespace_token: token,
+    });
+
+    expect(second.json.status).not.toBe("duplicate");
+    expect(second.json).not.toHaveProperty("result");
+    expect(second.json.status).toBe("held");
+  });
+
+  it("only reports duplicate once a result actually exists", async () => {
+    const n = ns();
+    const token = await open(n);
+
+    await call(n, "claim", { action_key: "k", namespace_token: token });
+    await call(n, "complete", {
+      action_key: "k",
+      namespace_token: token,
+      result: { charged: true },
+    });
+
+    const replay = await call(n, "claim", {
+      action_key: "k",
+      namespace_token: token,
+    });
+    expect(replay.json.status).toBe("duplicate");
+    expect(replay.json.result).toEqual({ charged: true });
   });
 });
 

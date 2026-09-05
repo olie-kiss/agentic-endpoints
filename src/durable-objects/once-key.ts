@@ -370,13 +370,28 @@ export class OnceKey extends DurableObject<Env> {
 
       // An unleased claim is terminal until its ttl: there is no basis on
       // which to decide the original claimant is gone, so it stays held.
+      //
+      // This is deliberately NOT "duplicate". The work has not completed and
+      // there is no result to hand back, so calling it a duplicate would tell
+      // the caller the action already succeeded when it may still be running
+      // or may have died half way through. A caller that skips its side
+      // effect on that basis silently loses the work. "held" says only what
+      // is actually known: someone else owns this key, nothing has completed,
+      // and nothing will free it before expires_at.
       const leaseExp = existing.lease_expires_at as string | null;
       if (!leaseExp) {
         return Response.json({
-          status: "duplicate",
+          status: "held",
           action_key: body.action_key,
           claimed_at: existing.claimed_at,
           expires_at: existing.expires_at,
+          retry_after: Math.max(
+            1,
+            Math.ceil(
+              (Date.parse(existing.expires_at as string) - now.getTime()) /
+                1000,
+            ),
+          ),
           ...ownership,
         });
       }

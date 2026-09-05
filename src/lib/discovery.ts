@@ -338,6 +338,10 @@ export function buildLlmsTxt(routes: RoutesConfig, origin: string): string {
   lines.push("     `retry_after` seconds; do not start the work.");
   lines.push("   - `duplicate` — already done. The `result` field holds the");
   lines.push("     original outcome; use it and do not repeat the work.");
+  lines.push("   - `held` — someone else claimed it but has not finished and");
+  lines.push("     set no lease. There is no result and may never be one. Do");
+  lines.push("     NOT treat this as done and do NOT do the work; the key is");
+  lines.push("     locked until `expires_at`.");
   lines.push("   - `conflict` — same key, different payload hash. Your key");
   lines.push("     derivation is wrong; do not proceed.");
   lines.push("2. `POST /once-key/complete` with the `result`. Free. This is");

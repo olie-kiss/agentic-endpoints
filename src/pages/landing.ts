@@ -319,8 +319,9 @@ ${endpointRow("POST", "/mcp", "Remote MCP server (Streamable HTTP). Listing tool
   <span class="kw">async</span> () =&gt; stripe.charges.<span class="fn">create</span>({ amount: order.total }),
 );
 
-<span class="cmt">// outcome: "executed" — you did the work</span>
-<span class="cmt">// outcome: "duplicate" — someone else already did it; result is theirs</span></div>
+<span class="cmt">// outcome: "performed" — you did the work</span>
+<span class="cmt">// outcome: "replayed"  — someone else already did it; result is theirs</span>
+<span class="cmt">// throws HeldError    — claimed but never completed; no result exists</span></div>
     </div>
 
     <div class="code-section">
@@ -338,6 +339,7 @@ ${endpointRow("POST", "/mcp", "Remote MCP server (Streamable HTTP). Listing tool
 
 <span class="cmt">// "claimed"     → you won the race, do the work</span>
 <span class="cmt">// "duplicate"   → already done; claim.result holds the outcome</span>
+<span class="cmt">// "held"        → claimed but never finished. No result. Do not do the work</span>
 <span class="cmt">// "in_progress" → someone else holds a live lease, wait and retry</span>
 <span class="cmt">// "conflict"    → same key, different payload. Never retry this.</span>
 
