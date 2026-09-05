@@ -65,7 +65,10 @@ describe("OnceKey namespace ownership", () => {
     await claim(n, { action_key: "a" });
 
     const attacker = await claim(n, { action_key: "victim-key" });
-    expect(attacker.status).toBe(403);
+    // 200 with a forbidden status: a 4xx would cancel settlement and turn
+    // namespace probing into a free oracle.
+    expect(attacker.status).toBe(200);
+    expect(attacker.json.status).toBe("forbidden");
   });
 
   it("rejects a wrong token", async () => {
@@ -76,7 +79,8 @@ describe("OnceKey namespace ownership", () => {
       action_key: "b",
       namespace_token: "not-the-right-token",
     });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    expect(res.json.status).toBe("forbidden");
   });
 });
 

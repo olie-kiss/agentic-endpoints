@@ -448,8 +448,11 @@ Paid requests are not rate limited — each one already costs the caller USDC.
 - **The free lifecycle endpoints do not reveal whether a namespace exists.**
   `/once-key/complete` and `/once-key/release` return an identical 404 whether
   the namespace was never claimed or your token is wrong, because a free
-  existence oracle is the reconnaissance step before squatting. `/once-key`
-  itself still answers 403, where each probe costs a payment.
+  existence oracle is the reconnaissance step before squatting. The paid
+  `/once-key` and `/vault/*` routes answer `200` with `status: "forbidden"`
+  instead of `403`, so that each probe actually settles a payment — a 4xx
+  would cancel settlement and leave the payment header replayable, making the
+  oracle free after all. **Branch on `status`, not on the HTTP code.**
 - **`namespace_token` is a bearer credential with no recovery path.** Anyone
   holding it *is* the owner. Worse than a normal leak: `/vault/rotate-token`
   is free and needs only the current token, so whoever steals it can rotate

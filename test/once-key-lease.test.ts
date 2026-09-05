@@ -365,10 +365,10 @@ describe("OnceKey release", () => {
     await open(n);
     const res = await call(n, "release", { action_key: "seed" });
 
-    // 404, not 403: the free lifecycle actions deliberately do not reveal
-    // whether a namespace exists, because that is a free oracle telling a
-    // squatter which names are worth claiming. The claim action still
-    // answers 403, where each probe costs a payment.
+    // 404, not "forbidden": the free lifecycle actions deliberately do not
+    // reveal whether a namespace exists, because that is a free oracle telling
+    // a squatter which names are worth claiming. The paid claim action answers
+    // 200 + status "forbidden" instead, so each probe actually settles.
     expect(res.status).toBe(404);
   });
 

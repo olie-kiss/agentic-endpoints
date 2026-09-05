@@ -229,8 +229,13 @@ export class OnceKey extends DurableObject<Env> {
        * The free lifecycle actions must not distinguish "wrong token" from
        * "never claimed": the pair is an unauthenticated, unmetered oracle for
        * which namespace names are in use, which is exactly the reconnaissance
-       * step before squatting one. `claim` still answers 403, because probing
-       * it costs the attacker a payment per guess.
+       * step before squatting one.
+       *
+       * `claim` answers 200 with status "forbidden" rather than 403 for the
+       * same reason: any status >=400 cancels x402 settlement, so a 403 would
+       * give the answer away free AND leave the payment header replayable,
+       * making the oracle unmetered after all. Charging is what makes guessing
+       * expensive.
        */
       if (action !== "claim") {
         return Response.json(
@@ -242,10 +247,10 @@ export class OnceKey extends DurableObject<Env> {
           { status: 404 },
         );
       }
-      return Response.json(
-        { error: "Invalid or missing namespace_token for this namespace" },
-        { status: 403 },
-      );
+      return Response.json({
+        status: "forbidden",
+        error: "Invalid or missing namespace_token for this namespace",
+      });
     }
 
     // First request claims the namespace and is issued a one-time token.
@@ -304,10 +309,11 @@ export class OnceKey extends DurableObject<Env> {
       if (this.getOwnerHash() === hash) {
         issuedToken = token;
       } else {
-        return Response.json(
-          { error: "Invalid or missing namespace_token for this namespace" },
-          { status: 403 },
-        );
+        // Lost the race. 200 for the same settlement reason as above.
+        return Response.json({
+          status: "forbidden",
+          error: "Invalid or missing namespace_token for this namespace",
+        });
       }
     }
 

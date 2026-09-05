@@ -139,13 +139,15 @@ export class Vault extends DurableObject<Env> {
   }
 
   private unauthorized(): Response {
-    return Response.json(
-      {
-        error:
-          "Invalid or missing namespace_token for this namespace",
-      },
-      { status: 403 },
-    );
+    // 200, not 403. Any status >=400 cancels x402 settlement, so a 403 would
+    // hand back the answer for free AND leave the payment header replayable --
+    // turning this into an unmetered oracle for which namespaces exist, which
+    // is the reconnaissance step before squatting one. Charging for the answer
+    // is what makes guessing expensive. Same policy as precondition_failed.
+    return Response.json({
+      status: "forbidden",
+      error: "Invalid or missing namespace_token for this namespace",
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -306,11 +308,11 @@ export class Vault extends DurableObject<Env> {
     // Without this, /store is last-write-wins: two agents rotating the same
     // secret silently clobber each other and neither can tell. That is the
     // one operation a secrets store must never lose quietly.
-    if (body.if_match !== undefined || body.if_absent) {
-      const current = this.ctx.storage.sql
-        .exec(`SELECT updated_at FROM items WHERE key = ?`, body.key)
-        .toArray()[0] as { updated_at?: string } | undefined;
+    const current = this.ctx.storage.sql
+      .exec(`SELECT updated_at FROM items WHERE key = ?`, body.key)
+      .toArray()[0] as { updated_at?: string } | undefined;
 
+    if (body.if_match !== undefined || body.if_absent) {
       const failed = body.if_absent
         ? current !== undefined
         : current?.updated_at !== body.if_match;
@@ -336,6 +338,21 @@ export class Vault extends DurableObject<Env> {
       }
     }
 
+    // `updated_at` doubles as the if_match version token, so it MUST change on
+    // every write. Date.now() only has millisecond resolution: two writes to
+    // the same key inside one millisecond produce an identical stamp, and a
+    // stale if_match would then compare equal and be silently accepted --
+    // losing the write the compare-and-swap above exists to protect. Force it
+    // strictly forward so every write gets a distinct, ordered version.
+    const previousMs = current?.updated_at
+      ? Date.parse(current.updated_at)
+      : Number.NaN;
+    const updatedAt = (
+      Number.isFinite(previousMs) && previousMs >= now.getTime()
+        ? new Date(previousMs + 1)
+        : now
+    ).toISOString();
+
     // Upsert — overwrite if key already exists
     this.ctx.storage.sql.exec(
       `INSERT INTO items (key, ciphertext, alg, size_bytes, created_at, updated_at, expires_at)
@@ -351,7 +368,7 @@ export class Vault extends DurableObject<Env> {
       body.alg ?? "aes-256-gcm",
       ciphertextBytes,
       now.toISOString(),
-      now.toISOString(),
+      updatedAt,
       expiresAt,
     );
 

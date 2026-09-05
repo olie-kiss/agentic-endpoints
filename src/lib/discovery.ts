@@ -252,9 +252,16 @@ export function buildOpenApi(routes: RoutesConfig, origin: string) {
             }
           : {}),
         responses: {
-          "200": { description: "Success" },
+          "200": {
+            description:
+              "Success, or a settled refusal. Paid routes answer 200 with a " +
+              'machine-readable `status` (e.g. "forbidden", "not_found", ' +
+              '"precondition_failed", "conflict") rather than a 4xx, because ' +
+              "any status >=400 cancels x402 settlement and would give the " +
+              "answer away for free. Always branch on `status`, not on the " +
+              "HTTP code.",
+          },
           "400": { description: "Malformed request." },
-          "403": { description: "Missing or invalid credential." },
           "404": { description: "No such record." },
           "429": { description: "Rate limited." },
         },

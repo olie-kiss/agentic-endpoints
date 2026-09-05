@@ -17,7 +17,8 @@ export type ClaimStatus =
   | "duplicate"
   | "held"
   | "in_progress"
-  | "conflict";
+  | "conflict"
+  | "forbidden";
 
 export interface ClientOptions {
   /** Defaults to the public deployment. */
@@ -123,6 +124,27 @@ export class HeldError extends Error {
  * If this fires, raise `leaseTtl` above your worst-case runtime, or drop it so
  * the key is never reclaimable.
  */
+/**
+ * The namespace exists and your `namespaceToken` does not open it.
+ *
+ * Carried as a 200 with `status: "forbidden"` rather than a 403, because any
+ * status >=400 cancels x402 settlement and would make namespace probing free.
+ * That makes it indistinguishable from success at the HTTP layer, so it is
+ * raised here — treating it as a successful claim would run the very side
+ * effect the token was meant to gate.
+ */
+export class UnauthorizedError extends Error {
+  constructor(public readonly namespace: string) {
+    super(
+      `namespace "${namespace}" is already claimed and the namespaceToken ` +
+        "you supplied does not match it. The work was NOT run. Supply the " +
+        "token issued when the namespace was first claimed, or pick a " +
+        "different namespace.",
+    );
+    this.name = "UnauthorizedError";
+  }
+}
+
 export class LeaseLostError<T = unknown> extends Error {
   constructor(
     readonly actionKey: string,
@@ -310,6 +332,10 @@ export class AgenticEndpoints {
 
       if (claim.status === "conflict") throw new ConflictError(actionKey);
 
+      if (claim.status === "forbidden") {
+        throw new UnauthorizedError(namespace);
+      }
+
       if (claim.status === "held") {
         throw new HeldError(actionKey, claim.expires_at);
       }
@@ -350,7 +376,22 @@ export class AgenticEndpoints {
         continue;
       }
 
-      // status === "claimed": we own it.
+      // Every other status is handled above, so this must be "claimed" — we
+      // own the key. Check it rather than falling through: an unrecognised
+      // status reaching here would run `work()` while believing it holds a
+      // claim it does not, which is precisely the duplicate side effect this
+      // method exists to prevent. Refusing an unknown status is always safe;
+      // guessing never is.
+      if (claim.status !== "claimed") {
+        throw new Error(
+          `/once-key returned unrecognised status "${claim.status}" for ` +
+            `action_key "${actionKey}". Refusing to run the work, because ` +
+            "this client cannot tell whether the claim was granted. Upgrade " +
+            "agentic-endpoints to a version that understands this status.",
+        );
+      }
+
+      // We own it.
       let value: T;
       try {
         value = await work();

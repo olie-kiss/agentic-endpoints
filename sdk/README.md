@@ -54,6 +54,8 @@ the duplicate charge you were paying to avoid.
 | Someone holds it but never finished | Throws `HeldError`. The work may be in flight or may have been abandoned; it is **not** a completed action and must not be treated as one |
 | The stored result cannot be decoded | Throws `ResultUnavailableError`. The work **did** run — do not repeat it — but its recorded outcome is lost |
 | Your lease lapsed and someone took over | Throws `LeaseLostError`. Your side effect has now run twice; carries both your result and the recorded one |
+| The namespace is not yours | Throws `UnauthorizedError`. The service reports this as a **200** so probing costs a payment, so the client must read `status` — the work is never run |
+| The service returns a status this client does not know | Throws. It refuses to run the work rather than assume the claim was granted |
 | Someone is mid-flight | Throws `InProgressError` with `retryAfter`. Pass `waitAttempts` to wait instead |
 | Same key, different inputs | Throws `ConflictError`. Never retryable — your key derivation is wrong |
 

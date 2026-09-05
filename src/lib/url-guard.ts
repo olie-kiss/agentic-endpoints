@@ -6,9 +6,32 @@
  *  - rejecting embedded credentials
  *  - rejecting internal hostnames and IP literals in private/reserved ranges
  *    (WHATWG URL already normalizes decimal/hex/octal IPv4 forms for us)
- *  - resolving hostnames over DoH and rejecting private answers (DNS rebinding)
+ *  - resolving hostnames over DoH and rejecting private answers
  *  - following redirects manually, re-validating every hop
  *  - bounding response size and total time
+ *
+ * KNOWN LIMITATION -- this does NOT defeat DNS rebinding.
+ *
+ * The DoH check and the fetch below are two independent resolutions of the
+ * same name. An attacker running their own nameserver with a very low TTL can
+ * answer the probe with a public address and the fetch with a private one, and
+ * the same window reopens on every redirect hop.
+ *
+ * Closing it properly means connecting to the address we vetted rather than to
+ * the name. That is not expressible on Workers: `cf.resolveOverride` accepts
+ * only hostnames within your own zone, never arbitrary third-party hosts or
+ * IPs, and connecting to an IP literal would break TLS SNI and certificate
+ * validation for https. There is no runtime API that pins a fetch to a
+ * resolved address.
+ *
+ * What actually bounds the risk is the egress path, not this file: Workers
+ * reach the internet through Cloudflare's network, which has no route to
+ * RFC1918 or loopback and exposes no cloud metadata endpoint, so a rebound
+ * private answer has nothing to reach. The DoH check remains worthwhile as
+ * defence in depth -- it stops the ordinary case of a name that simply points
+ * somewhere internal -- but it must not be mistaken for a rebinding defence.
+ * Do not put anything sensitive on a network reachable from this Worker's
+ * egress on the assumption that this guard prevents reaching it.
  */
 
 const MAX_REDIRECTS = 5;

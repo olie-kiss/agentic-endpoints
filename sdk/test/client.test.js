@@ -286,3 +286,48 @@ test("losing the lease mid-flight is surfaced, not reported as performed", async
     },
   );
 });
+
+test("a forbidden namespace is an error, and the work is never run", async () => {
+  // The service answers 200 (a 4xx would cancel x402 settlement and make
+  // namespace probing free), so denial is indistinguishable from success at
+  // the HTTP layer. If the client does not read the status it will run the
+  // very side effect the namespace token exists to gate.
+  let ran = false;
+  const { fetchImpl } = scriptedServer({
+    claim: {
+      status: "forbidden",
+      error: "Invalid or missing namespace_token for this namespace",
+    },
+  });
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  await assert.rejects(
+    () =>
+      client.exactlyOnce(base, async () => {
+        ran = true;
+        return "work";
+      }),
+    (err) => err.name === "UnauthorizedError",
+  );
+  assert.equal(ran, false, "denied callers must not run the side effect");
+});
+
+test("an unrecognised claim status refuses to run the work", async () => {
+  // Forward compatibility: a newer service returning a status this client
+  // does not know must never fall through into "we own the claim".
+  let ran = false;
+  const { fetchImpl } = scriptedServer({
+    claim: { status: "some_future_status" },
+  });
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  await assert.rejects(
+    () =>
+      client.exactlyOnce(base, async () => {
+        ran = true;
+        return "work";
+      }),
+    (err) => /unrecognised status/.test(err.message),
+  );
+  assert.equal(ran, false, "an unknown status must not run the side effect");
+});

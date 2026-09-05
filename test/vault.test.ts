@@ -49,14 +49,18 @@ describe("Vault ownership", () => {
     const n = ns();
     await claimed(n);
     const res = await vault(n, "/store", { key: "x", ciphertext: "c" });
-    expect(res.status).toBe(403);
+    // 200, because a 4xx would cancel x402 settlement and make namespace
+    // probing free. Denial is carried in the body.
+    expect(res.status).toBe(200);
+    expect(res.json.status).toBe("forbidden");
   });
 
   it("does not leak values to an unauthorized reader", async () => {
     const n = ns();
     await claimed(n);
     const res = await vault(n, "/retrieve", { key: "seed" });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    expect(res.json.status).toBe("forbidden");
     expect(JSON.stringify(res.json)).not.toContain("seed-value");
   });
 
@@ -183,13 +187,25 @@ describe("vault paid-route settlement contract", () => {
     expect(exists.status).toBe(200);
   });
 
-  it("still refuses unauthenticated callers with a real 4xx", async () => {
+  it("charges unauthenticated callers instead of handing them a free oracle", async () => {
     const n = ns();
     await claimed(n);
 
-    // No work was done here, so cancelling settlement is correct.
+    // This deliberately reverses an earlier rule ("no work was done, so
+    // cancelling settlement is correct"). Checking the token IS the work,
+    // exactly as comparing is the work for precondition_failed above.
+    //
+    // A 4xx cancels x402 settlement and leaves the X-PAYMENT header
+    // replayable, so one signature funds unlimited probing for which
+    // namespaces exist -- the reconnaissance step before squatting one, and
+    // squatting is unrecoverable by design. Charging is what makes guessing
+    // expensive. The cost is that a legitimate caller with a stale token pays
+    // to find out; that is the cheaper of the two failures.
     const res = await vault(n, "/retrieve", { key: "seed" });
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(200);
+    expect(res.json.status).toBe("forbidden");
+    // What must never change: denial still yields nothing.
+    expect(JSON.stringify(res.json)).not.toContain("seed-value");
   });
 });
 
@@ -210,7 +226,9 @@ describe("vault token rotation", () => {
       key: "seed",
       namespace_token: old,
     });
-    expect(withOld.status).toBeGreaterThanOrEqual(400);
+    expect(withOld.status).toBe(200);
+    expect(withOld.json.status).toBe("forbidden");
+    expect(JSON.stringify(withOld.json)).not.toContain("seed-value");
 
     const withNew = await vault(n, "/retrieve", {
       key: "seed",
@@ -227,7 +245,9 @@ describe("vault token rotation", () => {
     const res = await vault(n, "/rotate-token", {
       namespace_token: "not-the-token",
     });
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(200);
+    expect(res.json.status).toBe("forbidden");
+    // The critical part: a failed rotation must not mint a token.
     expect(res.json.namespace_token).toBeUndefined();
   });
 
@@ -280,6 +300,49 @@ describe("vault compare-and-swap", () => {
       namespace_token: token,
     });
     expect(current.json.ciphertext).toBe("v2");
+  });
+
+  it("gives every write a distinct version, even within one millisecond", async () => {
+    const n = ns();
+    const token = await claimed(n);
+
+    // updated_at doubles as the if_match version token, and Date.now() only
+    // has millisecond resolution. Back-to-back writes land in the same
+    // millisecond, and if they share a stamp a stale if_match compares equal
+    // and is silently accepted -- losing the write CAS exists to protect.
+    // This loop is what made the CAS test flaky rather than merely wrong.
+    const versions: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      const res = await vault(n, "/store", {
+        key: "hot",
+        ciphertext: `v${i}`,
+        namespace_token: token,
+      });
+      expect(res.status).toBe(200);
+      versions.push(String(res.json.updated_at));
+    }
+
+    expect(new Set(versions).size).toBe(versions.length);
+    for (let i = 1; i < versions.length; i++) {
+      expect(Date.parse(versions[i])).toBeGreaterThan(
+        Date.parse(versions[i - 1]),
+      );
+    }
+
+    // The very first version must still be rejected after all those writes.
+    const stale = await vault(n, "/store", {
+      key: "hot",
+      ciphertext: "clobber",
+      namespace_token: token,
+      if_match: versions[0],
+    });
+    expect(stale.json.status).toBe("precondition_failed");
+
+    const current = await vault(n, "/retrieve", {
+      key: "hot",
+      namespace_token: token,
+    });
+    expect(current.json.ciphertext).toBe("v24");
   });
 
   it("allows a write on the current version", async () => {
@@ -367,6 +430,8 @@ describe("vault listing", () => {
     const n = ns();
     await claimed(n);
     const res = await vault(n, "/list", {});
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(200);
+    expect(res.json.status).toBe("forbidden");
+    expect(res.json.keys).toBeUndefined();
   });
 });
