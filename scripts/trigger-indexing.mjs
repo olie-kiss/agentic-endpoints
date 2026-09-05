@@ -58,6 +58,19 @@ const PROBE_BODIES = {
   "/vault/delete": { namespace: "bazaar-probe", key: "k" },
   "/vault/exists": { namespace: "bazaar-probe", key: "k" },
   "/vault/list": { namespace: "bazaar-probe" },
+  // Meetings. import must settle first: it claims the namespace AND returns
+  // the meeting_id that get/delete need, and without either they are refused
+  // before any payment and never list.
+  "/meetings/import": {
+    namespace: "bazaar-probe",
+    title: "Bazaar probe",
+    visibility: "queryable",
+    transcript: "A short probe transcript announcing this route to the Bazaar.",
+  },
+  "/meetings/search": { namespace: "bazaar-probe", query: "probe" },
+  "/meetings/get": { namespace: "bazaar-probe" },
+  "/meetings/list": { namespace: "bazaar-probe" },
+  "/meetings/delete": { namespace: "bazaar-probe" },
 };
 
 /** Namespace used by the vault probes, unique per run so a leftover token
@@ -83,7 +96,11 @@ const PAID_ROUTES = catalogue.endpoints
   // most expensive vault route but it issues the namespace token the others
   // need, and without it they are refused 403, never settle, and never list.
   .sort((a, b) => {
-    const first = (e) => (e.path === "/vault/store" ? 0 : 1);
+    // /vault/store and /meetings/import are not the cheapest, but each issues
+    // the namespace token every other route in its service needs. Run them
+    // first or the rest are refused, never settle, and never list.
+    const first = (e) =>
+      e.path === "/vault/store" || e.path === "/meetings/import" ? 0 : 1;
     return (
       first(a) - first(b) ||
       parseFloat(a.price.slice(1)) - parseFloat(b.price.slice(1))
@@ -140,6 +157,10 @@ const http = new x402HTTPClient(client);
  */
 const tokens = {};
 
+/** Ids of records created by a probe, so later routes in the same service can
+ *  address something that actually exists. */
+const ids = {};
+
 const serviceOf = (path) =>
   path.startsWith("/vault/") ? "vault" : path.split("/")[1];
 
@@ -148,6 +169,13 @@ for (const route of PAID_ROUTES) {
   if (route.body.namespace !== undefined || service === "vault") {
     route.body.namespace = PROBE_NS;
     if (tokens[service]) route.body.namespace_token = tokens[service];
+  }
+
+  // /meetings/get and /meetings/delete are refused with 400 before any
+  // payment unless they name a real meeting, so they can only be announced
+  // using the id returned by the import above.
+  if (ids[service] && route.body.meeting_id === undefined) {
+    route.body.meeting_id = ids[service];
   }
 
   const url = `${baseUrl}${route.path}`;
@@ -183,6 +211,7 @@ for (const route of PAID_ROUTES) {
       .catch(() => ({}));
 
     if (parsed.namespace_token) tokens[service] = parsed.namespace_token;
+    if (parsed.meeting_id) ids[service] = parsed.meeting_id;
 
     // Settlement, not the handler's answer, is what gets a route listed.
     const settled = paid.status < 400;
