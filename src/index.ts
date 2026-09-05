@@ -748,9 +748,9 @@ export function buildRoutes(env: Env): RoutesConfig {
           namespace: "my-meetings-4f9c2b1e8d7a",
           title: "Pricing review",
           occurred_at: "2026-01-04T15:00:00.000Z",
-          source: "zoom-vtt",
+          source: "webvtt",
           visibility: "queryable",
-          transcript: "Alice: we agreed to hold at $9 a month...",
+          transcript: "Alice: we agreed to ship the redesign before the audit...",
           participants: ["Alice", "Bob"],
         },
         inputSchema: {
@@ -759,7 +759,7 @@ export function buildRoutes(env: Env): RoutesConfig {
             namespace: { type: "string", description: "Meeting memory isolation scope" },
             title: { type: "string", description: "Human-readable meeting title" },
             occurred_at: { type: "string", description: "ISO-8601 time the meeting happened" },
-            source: { type: "string", description: "Where the transcript came from (zoom-vtt, otter, granola, slipbox...)" },
+            source: { type: "string", description: "Free-form label for where the transcript came from (e.g. webvtt, srt, plain-text)" },
             visibility: {
               type: "string",
               description:

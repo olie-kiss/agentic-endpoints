@@ -82,7 +82,7 @@ const TOOLS: ToolDef[] = [
         namespace_token: NAMESPACE_TOKEN,
         title: str("Human-readable meeting title"),
         occurred_at: str("ISO-8601 time the meeting happened"),
-        source: str("Where the transcript came from, e.g. zoom-vtt, otter, granola, slipbox"),
+        source: str("Free-form label for where the transcript came from, e.g. webvtt, srt, plain-text"),
         visibility: str(
           "'queryable' (plaintext, searchable, readable by this service) or 'private' (ciphertext, never searchable). Defaults to private.",
         ),

@@ -416,10 +416,10 @@ curl -X POST https://ai.oliverkiss.com/meetings/import \
     "namespace": "my-meetings-4f9c2b1e8d7a",
     "title": "Pricing review",
     "occurred_at": "2026-09-01T15:00:00.000Z",
-    "source": "zoom-vtt",
+    "source": "webvtt",
     "visibility": "queryable",
     "participants": ["Alice", "Bob"],
-    "transcript": "Alice: we agreed to hold pricing at nine dollars a month."
+    "transcript": "Alice: we agreed to ship the redesign before the audit."
   }'
 
 # Then ask a question of every meeting at once.
