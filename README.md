@@ -259,8 +259,10 @@ npm run deploy
 npm test
 npm run typecheck
 
-# Re-announce every route to the PayAI Bazaar. Signs a payment attempt with a
-# throwaway, never-funded key: verification fails on balance, nothing is spent.
+# Re-announce every route to the PayAI Bazaar. This SPENDS REAL USDC: a route
+# is catalogued only once a payment for it settles. It refuses to start unless
+# the wallet covers the whole run.
+export X402_TEST_PRIVATE_KEY=0x...
 node scripts/trigger-indexing.mjs
 
 # Make one real paid call. Requires a THROWAWAY wallet holding a little USDC
@@ -292,9 +294,12 @@ demanded testnet tokens would hand out real work for money anyone can mint.
 X402_TEST_PRIVATE_KEY=0x... node scripts/trigger-indexing.mjs
 ```
 
-Pays for each route once, which is what puts it in the catalogue. $0.068 for
-all 9 utility routes; credit packs are excluded unless you pass
-`--include-credits`.
+Pays for each route once, which is what puts it in the catalogue. $0.082 for
+all 14 utility routes; credit packs are excluded unless you pass
+`--include-credits`. The script checks the payer's USDC balance against that
+total first and refuses to start if it falls short, because a wallet that runs
+dry midway leaves the catalogue half-populated with no way to tell which
+routes made it.
 
 ## API Examples
 
@@ -480,18 +485,47 @@ to reset it against.
 |-------|-------|
 | Free requests (no `X-PAYMENT`) | 60/min per IP, per Cloudflare location |
 | Vault writes | 20/min per IP |
+| Paid requests | 600/min |
 | Request body | 2 MiB |
 | Vault item | 256 KiB ciphertext |
 | Vault namespace | 1,000 items / 25 MiB |
 
-Paid requests are not rate limited — each one already costs the caller USDC.
+Paid requests are throttled far more loosely than anonymous ones, because a
+caller who is paying per call already has a spend ceiling. They are not
+unlimited.
+
+### Concurrent paid calls
+
+Paid calls issued **concurrently from the same wallet** are refused a
+noticeable fraction of the time — measured at 2 in 10 up to 8 in 15 on Base
+Sepolia, independent of our rate limits, and reproducible with as few as 5 in
+flight. The refusal is an ordinary `402`, and it originates at the facilitator,
+which will not verify overlapping authorizations from one payer.
+
+**Nothing is charged for a refused call.** Measured directly: 10 concurrent
+calls at $0.005, 8 settled, 2 refused, and the payer's balance moved by exactly
+$0.040. Any status at or above 400 cancels x402 settlement, and that holds here.
+
+So a `402` on a paid request means the payment did not happen and it is safe to
+retry with a fresh signature. If you need throughput, issue paid calls
+sequentially, or retry on `402` with a short backoff. Do not treat a `402` as a
+charge you need to reconcile.
 
 ## Security Notes
 
 - **URL-taking endpoints are SSRF-guarded** (`src/lib/url-guard.ts`): scheme
   allowlist, private/reserved IPv4 and IPv6 ranges blocked, hostnames resolved
-  over DNS-over-HTTPS to defeat rebinding, every redirect hop re-validated, and
-  response bodies bounded. It fails closed.
+  over DNS-over-HTTPS and private answers rejected, every redirect hop
+  re-validated, and response bodies bounded. It fails closed.
+  **It does not defeat DNS rebinding**, and does not claim to: the DoH probe
+  and the fetch are two independent resolutions, so a hostile low-TTL
+  nameserver can answer them differently. Pinning the fetch to the vetted
+  address is not expressible on Workers — `cf.resolveOverride` only accepts
+  hostnames inside your own zone, and an IP literal breaks TLS SNI. What
+  bounds the risk is the egress path: Workers reach the internet through
+  Cloudflare's network, which has no route to RFC1918 or loopback and exposes
+  no metadata endpoint. Do not place anything sensitive where this Worker's
+  egress can reach it on the assumption that this guard stops it.
 - **Vault and OnceKey namespaces are ownership-gated.** The first request to a
   namespace is issued a one-time `namespace_token`; tokens are stored only as
   SHA-256 hashes and compared in constant time.

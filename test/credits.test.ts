@@ -44,20 +44,33 @@ describe("credit accounts", () => {
     expect(ledger?.balance_usd).toBe("5.000000");
   });
 
-  it("debits exactly the price with no rounding drift", async () => {
-    const tokenHash = await fund("tok-drift", 1_000_000);
-    const { stub } = await account("tok-drift");
+  it(
+    "debits exactly the price with no rounding drift",
+    async () => {
+      const tokenHash = await fund("tok-drift", 1_000_000);
+      const { stub } = await account("tok-drift");
 
-    // 1000 calls at $0.001 must consume exactly $1.00, not $0.999999.
-    for (let i = 0; i < 1000; i++) {
-      await runInDurableObject(stub, (d: Credits) => d.spend(tokenHash, 1_000));
-    }
+      // 1000 calls at $0.001 must consume exactly $1.00, not $0.999999.
+      for (let i = 0; i < 1000; i++) {
+        await runInDurableObject(stub, (d: Credits) => d.spend(tokenHash, 1_000));
+      }
 
-    const ledger = await runInDurableObject(stub, (d: Credits) => d.balance(tokenHash));
-    expect(ledger?.balance_micros).toBe(0);
-    expect(ledger?.spent_usd).toBe("1.000000");
-    expect(ledger?.call_count).toBe(1000);
-  });
+      const ledger = await runInDurableObject(stub, (d: Credits) => d.balance(tokenHash));
+      expect(ledger?.balance_micros).toBe(0);
+      expect(ledger?.spent_usd).toBe("1.000000");
+      expect(ledger?.call_count).toBe(1000);
+    },
+    // 1000 separate round-trips through the test harness land around 4.8s,
+    // close enough to vitest's 5s default that this failed intermittently and
+    // made the whole suite untrustworthy as a gate.
+    //
+    // The loop is deliberately not collapsed into a single runInDurableObject
+    // call. That would be far faster, but real calls arrive as separate
+    // invocations, and drift that only appears across invocation boundaries is
+    // exactly the kind this test exists to catch. The runtime is the price of
+    // testing the real shape, so the timeout is raised instead.
+    30_000,
+  );
 
   it("refuses to overdraw", async () => {
     const tokenHash = await fund("tok-over", 5_000);
@@ -129,8 +142,32 @@ describe("credit accounts", () => {
 
     expect(results.filter((r) => r.ok).length).toBe(2);
 
+    const overdrawn = await runInDurableObject(stub, (i: Credits) =>
+      i.balance(tokenHash),
+    );
+    expect(overdrawn?.balance_micros).toBe(0);
+  });
+
+  it("lets every concurrent spend through when the balance covers them all", async () => {
+    const tokenHash = await fund("tok-race-funded", 1_000_000);
+    const { stub } = await account("tok-race-funded");
+
+    // The sibling test above proves concurrency cannot overdraw. This proves
+    // the opposite half, which is what the docs promise: credits are the
+    // answer to the facilitator refusing overlapping x402 authorizations from
+    // one payer, so concurrent credit debits must not fail spuriously. If
+    // they did, the documented workaround would be advice to fail differently.
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        runInDurableObject(stub, (i: Credits) => i.spend(tokenHash, 5_000)),
+      ),
+    );
+
+    expect(results.filter((r) => r.ok).length).toBe(20);
+
     const ledger = await runInDurableObject(stub, (i: Credits) => i.balance(tokenHash));
-    expect(ledger?.balance_micros).toBe(0);
+    expect(ledger?.balance_micros).toBe(900_000);
+    expect(ledger?.call_count).toBe(20);
   });
 });
 
