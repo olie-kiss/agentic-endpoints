@@ -53,6 +53,52 @@ const SERVER_CAPABILITIES = { tools: { listChanged: false } } as const;
 const SERVER_INSTRUCTIONS =
   "Pay-per-call utilities for autonomous agents, settled in USDC on Base via x402. tools/list is free. Every tool that does work is paid; calling one without payment returns the price and payment address.";
 
+/**
+ * Annotation profiles. Named rather than inlined so that two routes with the
+ * same semantics cannot accidentally describe themselves differently.
+ *
+ * `idempotentHint` is the load-bearing one here: it tells an agent whether a
+ * retry after an ambiguous failure is free or charges again.
+ */
+
+/** Pure reads. Safe to repeat, touch nothing outside this service. */
+const READS = { readOnlyHint: true, idempotentHint: true, openWorldHint: false } as const;
+
+/** Pure reads that fetch arbitrary third-party URLs. */
+const READS_WEB = { readOnlyHint: true, idempotentHint: true, openWorldHint: true } as const;
+
+/** Writes that converge on the same state when repeated. Retry is safe. */
+const WRITES_IDEMPOTENT = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+/** Writes where each call creates another record. A retry duplicates data. */
+const WRITES_APPENDS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+
+/** Overwrites or removes existing data, but repeating lands in the same state. */
+const WRITES_DESTRUCTIVE = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+/** Destroys prior state and yields a different result every call. */
+const WRITES_ROTATES = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+
 interface ToolDef {
   name: string;
   title: string;
@@ -61,6 +107,13 @@ interface ToolDef {
   path: string;
   price: string;
   inputSchema: Record<string, unknown>;
+  /**
+   * Behavioural hints. These are advisory per spec, but for a paid API they
+   * are the difference between an agent safely retrying a failed call and
+   * paying twice for it, so they are derived from each route's real
+   * semantics rather than defaulted.
+   */
+  annotations: Record<string, boolean>;
 }
 
 const str = (description: string) => ({ type: "string", description });
@@ -77,6 +130,7 @@ const TOOLS: ToolDef[] = [
       "Ask a question across every meeting you have imported as queryable, and get back ranked excerpts with the meeting they came from. This is the tool to use when the user refers to something that was said, agreed, or decided in a call -- 'what did we decide about pricing', 'who owned the migration', 'when did we say we would ship'. Returns 'searched_meetings' and 'private_meetings_skipped': meetings imported as private are encrypted and CANNOT be searched, so if searched_meetings is 0 an empty result means nothing was searched, NOT that the topic was never discussed. Use meetings_get to read a full transcript once you have found the right meeting.",
     path: "/meetings/search",
     price: "$0.006",
+    annotations: READS,
     inputSchema: {
       type: "object",
       properties: {
@@ -98,6 +152,7 @@ const TOOLS: ToolDef[] = [
       "Store a transcript so it can be searched later. `visibility` is a required decision and cannot be guessed for you: 'queryable' stores plaintext, indexes it, and means this service can read it; 'private' stores ciphertext you encrypted yourself, which is unreadable here and therefore NEVER searchable. Send `transcript` for queryable and `ciphertext` for private -- the mismatched combinations are refused rather than silently doing the wrong thing. The first import into a namespace returns a namespace_token shown exactly once; save it or the namespace is unrecoverable.",
     path: "/meetings/import",
     price: "$0.004",
+    annotations: WRITES_APPENDS,
     inputSchema: {
       type: "object",
       properties: {
@@ -124,6 +179,7 @@ const TOOLS: ToolDef[] = [
       "Fetch a single meeting by meeting_id, including its full transcript when it was imported as queryable. Use this after meetings_search has identified the meeting you want. A 'content_missing' status means the record exists but its stored text could not be found -- that is a broken record, not an empty meeting, so do not report it as one.",
     path: "/meetings/get",
     price: "$0.002",
+    annotations: READS,
     inputSchema: {
       type: "object",
       properties: {
@@ -142,6 +198,7 @@ const TOOLS: ToolDef[] = [
       "List the meetings in a namespace newest first, with titles, dates, participants and whether each one is searchable. Never returns transcripts. Useful for orienting before a search, and for finding meetings that are private and therefore invisible to meetings_search.",
     path: "/meetings/list",
     price: "$0.001",
+    annotations: READS,
     inputSchema: {
       type: "object",
       properties: {
@@ -160,6 +217,7 @@ const TOOLS: ToolDef[] = [
       "Atomic idempotency witness. Claims a {namespace, action_key} pair exactly once, so a fleet of agents cannot perform the same side effect twice. Call this BEFORE any non-idempotent action such as sending an email, charging a card, or posting an order. Returns one of: 'claimed' — you won, do the work, then call once_key_complete; 'in_progress' — another agent holds a live lease, wait retry_after seconds and do NOT do the work; 'duplicate' — already done, and the 'result' field carries the original outcome, so use it instead of repeating the work; 'held' — another agent claimed this key, set no lease, and has NOT completed it: there is no result and there may never be one, so do NOT do the work and do NOT treat it as done, because the key stays locked until expires_at; 'conflict' — the same key was claimed with a different payload hash, so your key derivation is wrong. Backed by a strongly consistent Durable Object; this is not something an agent can safely reimplement locally.",
     path: "/once-key",
     price: "$0.001",
+    annotations: WRITES_IDEMPOTENT,
     inputSchema: {
       type: "object",
       properties: {
@@ -187,6 +245,7 @@ const TOOLS: ToolDef[] = [
       "Free. Records the result of work you performed under a claim from once_key_claim. Every later claim of that action_key returns 'duplicate' along with this result, which is what lets another agent continue without repeating the side effect. Always call this after the work succeeds — a claim with no recorded result leaves every other agent unable to learn what happened. Completion is final and cannot be overwritten.",
     path: "/once-key/complete",
     price: "free",
+    annotations: WRITES_IDEMPOTENT,
     inputSchema: {
       type: "object",
       properties: {
@@ -213,6 +272,7 @@ const TOOLS: ToolDef[] = [
       "Free. Surrenders a claimed action_key so a retry can start immediately instead of waiting out the lease. Call this when the work you claimed fails. Refuses if the key was already completed, because releasing it would discard the recorded result and allow the side effect to run twice.",
     path: "/once-key/release",
     price: "free",
+    annotations: WRITES_IDEMPOTENT,
     inputSchema: {
       type: "object",
       properties: {
@@ -231,6 +291,7 @@ const TOOLS: ToolDef[] = [
       "Store client-side encrypted data. This service holds no key that could decrypt it and never sees plaintext; note that the item key, namespace, alg label and size ARE stored in the clear. The first store claims the namespace and returns a namespace_token shown only once — store it immediately, because it is required by every later call and cannot be recovered. Pass if_match with an item's updated_at for a compare-and-swap write, or if_absent to create only; either returns status 'precondition_failed' rather than silently clobbering a concurrent write.",
     path: "/vault/store",
     price: "$0.02",
+    annotations: WRITES_DESTRUCTIVE,
     inputSchema: {
       type: "object",
       properties: {
@@ -259,6 +320,7 @@ const TOOLS: ToolDef[] = [
     description: "Retrieve a previously stored ciphertext. Requires the namespace_token.",
     path: "/vault/retrieve",
     price: "$0.02",
+    annotations: READS,
     inputSchema: {
       type: "object",
       properties: {
@@ -277,6 +339,7 @@ const TOOLS: ToolDef[] = [
       "Check for a key without returning its ciphertext. Requires the namespace_token.",
     path: "/vault/exists",
     price: "$0.001",
+    annotations: READS,
     inputSchema: {
       type: "object",
       properties: {
@@ -294,6 +357,7 @@ const TOOLS: ToolDef[] = [
     description: "Permanently delete an item. Requires the namespace_token.",
     path: "/vault/delete",
     price: "$0.005",
+    annotations: WRITES_DESTRUCTIVE,
     inputSchema: {
       type: "object",
       properties: {
@@ -312,6 +376,7 @@ const TOOLS: ToolDef[] = [
       "List the keys held in a namespace with their metadata: alg, size, timestamps. Never returns ciphertext — use vault_retrieve for that. Each item's updated_at is the version to pass back as if_match on a conditional store. Use this when you have stored secrets and need to know what is there.",
     path: "/vault/list",
     price: "$0.001",
+    annotations: READS,
     inputSchema: {
       type: "object",
       properties: {
@@ -329,6 +394,7 @@ const TOOLS: ToolDef[] = [
       "Free. Mints a new namespace_token and immediately invalidates the current one, which you must present to authorize the rotation. Do this whenever the token may have been exposed — a leaked token is otherwise permanent, unrevocable read and delete access to every secret in the namespace. There is no recovery if you lose the token.",
     path: "/vault/rotate-token",
     price: "free",
+    annotations: WRITES_ROTATES,
     inputSchema: {
       type: "object",
       properties: {
@@ -346,6 +412,7 @@ const TOOLS: ToolDef[] = [
       "Extract text from a PDF by URL. Handles compressed streams, PDF 1.5+ object streams and ToUnicode CMaps, and reports encrypted or image-only documents honestly instead of returning garbage.",
     path: "/pdf-parse",
     price: "$0.01",
+    annotations: READS_WEB,
     inputSchema: {
       type: "object",
       properties: {
@@ -363,6 +430,7 @@ const TOOLS: ToolDef[] = [
       "Fetch a URL and return readable text or markdown, optionally narrowed by CSS selector. Requests to private, loopback and link-local addresses are refused, and every redirect hop is re-validated.",
     path: "/scrape",
     price: "$0.005",
+    annotations: READS_WEB,
     inputSchema: {
       type: "object",
       properties: {
@@ -385,6 +453,7 @@ const TOOLS: ToolDef[] = [
       "Reduce text to fit a token budget, preserving whole sentences and reporting before/after token estimates.",
     path: "/compress",
     price: "$0.005",
+    annotations: READS,
     inputSchema: {
       type: "object",
       properties: {
@@ -580,6 +649,7 @@ app.post("/", async (c) => {
               ? `${t.description} This tool is free; no payment is required.`
               : `${t.description} Costs ${t.price} in USDC on Base, paid via the x402 protocol.`,
           inputSchema: t.inputSchema,
+          annotations: t.annotations,
         })),
         // The catalogue is identical for every caller and changes only on
         // deploy, so it is safe for clients to cache and share.

@@ -136,6 +136,41 @@ describe("MCP tools", () => {
     expect(json.result.tools.length).toBe(16);
   });
 
+  /**
+   * Annotations are advisory in the spec, but on a paid API `idempotentHint`
+   * decides whether an agent retries an ambiguous failure or pays twice.
+   * These assertions pin the cases where being wrong costs the caller money.
+   */
+  it("annotates every tool with retry-safety hints", async () => {
+    const { json } = await rpc("tools/list");
+    const byName = Object.fromEntries(json.result.tools.map((t: any) => [t.name, t.annotations]));
+
+    for (const tool of json.result.tools) {
+      expect(tool.annotations, tool.name).toBeDefined();
+      expect(typeof tool.annotations.idempotentHint, tool.name).toBe("boolean");
+    }
+
+    // Repeating a claim returning the same answer is the entire point of the
+    // once-key product; if this ever flips, the guarantee is broken.
+    expect(byName.once_key_claim.idempotentHint).toBe(true);
+    expect(byName.once_key_claim.readOnlyHint).toBe(false);
+
+    // Each import creates another meeting, so a retry duplicates data.
+    expect(byName.meetings_import.idempotentHint).toBe(false);
+
+    // Rotation issues a new token every call and invalidates the old one.
+    expect(byName.vault_rotate_token.idempotentHint).toBe(false);
+    expect(byName.vault_rotate_token.destructiveHint).toBe(true);
+
+    expect(byName.vault_delete.destructiveHint).toBe(true);
+    expect(byName.meetings_search.readOnlyHint).toBe(true);
+
+    // Only the tools that fetch third-party URLs touch the open world.
+    expect(byName.scrape.openWorldHint).toBe(true);
+    expect(byName.pdf_parse.openWorldHint).toBe(true);
+    expect(byName.compress.openWorldHint).toBe(false);
+  });
+
   it("states a price on every tool, including the free ones", async () => {
     const { json } = await rpc("tools/list");
     for (const tool of json.result.tools) {
