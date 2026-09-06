@@ -29,6 +29,29 @@ const SUPPORTED_PROTOCOLS = [LATEST_PROTOCOL, "2025-11-25", "2025-06-18", "2025-
 const ASSUMED_LEGACY_PROTOCOL = "2025-03-26";
 
 const META_VERSION = "io.modelcontextprotocol/protocolVersion";
+const META_SERVER_INFO = "io.modelcontextprotocol/serverInfo";
+
+/**
+ * Claimed by both `initialize` and `server/discover`. Kept in one place so the
+ * two cannot drift into describing the server differently.
+ */
+const SERVER_INFO = {
+  name: "agentic-endpoints",
+  title: "Agentic Endpoints",
+  version: "1.0.0",
+  // `description` and `websiteUrl` are not in the MCP Implementation schema,
+  // but registries scrape them and an empty description makes a discovery
+  // listing close to useless — Smithery published us with a blank one because
+  // it does not map `instructions`. Additive and ignored by spec-strict clients.
+  description:
+    "Pay-per-call HTTP and MCP utilities for autonomous AI agents, settled in USDC on Base via the x402 protocol. No signup, no API keys, no subscription — an agent pays per request. Includes exactly-once idempotency claims, an encrypted vault, web scraping, PDF text extraction, and token compression.",
+  websiteUrl: "https://ai.oliverkiss.com",
+} as const;
+
+const SERVER_CAPABILITIES = { tools: { listChanged: false } } as const;
+
+const SERVER_INSTRUCTIONS =
+  "Pay-per-call utilities for autonomous agents, settled in USDC on Base via x402. tools/list is free. Every tool that does work is paid; calling one without payment returns the price and payment address.";
 
 interface ToolDef {
   name: string;
@@ -500,6 +523,22 @@ app.post("/", async (c) => {
 
   switch (method) {
     /**
+     * Mandatory on the current spec ("Servers MUST implement it"). Lets a
+     * client fetch supported versions, capabilities and identity in one call
+     * instead of probing, and is the documented stdio fallback probe. We
+     * previously answered -32601, which a spec-current client reads as a
+     * broken server.
+     */
+    case "server/discover":
+      return rpcResult(id, {
+        resultType: "complete",
+        supportedVersions: SUPPORTED_PROTOCOLS,
+        capabilities: SERVER_CAPABILITIES,
+        instructions: SERVER_INSTRUCTIONS,
+        _meta: { [META_SERVER_INFO]: SERVER_INFO },
+      });
+
+    /**
      * Retained for clients on initialize-based revisions. Servers on the
      * current spec have no handshake, but answering keeps older clients
      * working instead of failing at connect time.
@@ -507,22 +546,9 @@ app.post("/", async (c) => {
     case "initialize":
       return rpcResult(id, {
         protocolVersion: SUPPORTED_PROTOCOLS.includes(version) ? version : LATEST_PROTOCOL,
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: {
-          name: "agentic-endpoints",
-          title: "Agentic Endpoints",
-          version: "1.0.0",
-          // `description` and `websiteUrl` are not in the MCP Implementation
-          // schema, but registries scrape them and an empty description makes
-          // a discovery listing close to useless — Smithery published us with
-          // a blank one because it does not map `instructions`. Additive and
-          // ignored by spec-strict clients.
-          description:
-            "Pay-per-call HTTP and MCP utilities for autonomous AI agents, settled in USDC on Base via the x402 protocol. No signup, no API keys, no subscription — an agent pays per request. Includes exactly-once idempotency claims, an encrypted vault, web scraping, PDF text extraction, and token compression.",
-          websiteUrl: "https://ai.oliverkiss.com",
-        },
-        instructions:
-          "Pay-per-call utilities for autonomous agents, settled in USDC on Base via x402. tools/list is free. Every tool that does work is paid; calling one without payment returns the price and payment address.",
+        capabilities: SERVER_CAPABILITIES,
+        serverInfo: SERVER_INFO,
+        instructions: SERVER_INSTRUCTIONS,
       });
 
     case "ping":

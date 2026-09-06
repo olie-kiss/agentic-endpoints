@@ -93,6 +93,30 @@ describe("MCP transport", () => {
     expect(json.result.serverInfo.name).toBe("agentic-endpoints");
   });
 
+  /**
+   * `server/discover` is mandatory on the current spec, and is what registry
+   * scanners and spec-current clients call before anything else. Answering
+   * -32601 reads as a broken server, so this is a contract, not a nicety.
+   */
+  it("implements the mandatory server/discover RPC, for free", async () => {
+    const { status, json } = await rpc("server/discover");
+    expect(status).toBe(200);
+    expect(json.error).toBeUndefined();
+    expect(json.result.supportedVersions).toContain("2026-07-28");
+    expect(json.result.capabilities.tools).toBeDefined();
+    expect(json.result.instructions).toBeTruthy();
+    expect(json.result._meta["io.modelcontextprotocol/serverInfo"].name).toBe("agentic-endpoints");
+  });
+
+  it("describes itself identically in discover and initialize", async () => {
+    const discover = await rpc("server/discover");
+    const init = await rpc("initialize", {}, { protocol: "2025-06-18" });
+    expect(discover.json.result._meta["io.modelcontextprotocol/serverInfo"]).toEqual(
+      init.json.result.serverInfo,
+    );
+    expect(discover.json.result.instructions).toBe(init.json.result.instructions);
+  });
+
   it("rejects malformed JSON", async () => {
     const res = await SELF.fetch("https://ai.oliverkiss.com/mcp", {
       method: "POST",
