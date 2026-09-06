@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Agentic Endpoints">
+  <title>Agentic Endpoints</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1B1F3B"/>
+      <stop offset="100%" stop-color="#0B0D1A"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!--
+    "402" is the identity: the HTTP status this whole service is built on.
+    Set large and heavy so it survives being rendered at 32px in a directory
+    listing, which is where it will almost always be seen.
+  -->
+  <text x="256" y="304"
+        font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace"
+        font-size="176" font-weight="700" letter-spacing="-6"
+        text-anchor="middle" fill="#F5F7FF">402</text>
+
+  <!-- Payment rail: the coin is the settled call. -->
+  <rect x="120" y="360" width="272" height="14" rx="7" fill="#2E3457"/>
+  <circle cx="326" cy="367" r="26" fill="#5B8CFF"/>
+  <circle cx="326" cy="367" r="10" fill="#0B0D1A"/>
+</svg>
