@@ -606,4 +606,4 @@ services such as Mercury and Sphere Pay are not an option.
 
 ## License
 
-ISC
+MIT — see [LICENSE](./LICENSE).
