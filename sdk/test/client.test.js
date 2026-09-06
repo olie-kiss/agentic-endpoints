@@ -21,7 +21,11 @@ function fakeServer(claimResponses) {
     calls.push({ path, body: JSON.parse(init.body) });
 
     if (path === "/once-key") {
-      const next = queue.shift();
+      // A queue that runs dry used to throw an unrelated TypeError, which
+      // masked what a test was actually asserting. Repeating the final
+      // scripted response keeps a test that scripts one 402 meaningful now
+      // that a refused payment is retried.
+      const next = queue.length > 1 ? queue.shift() : queue[0];
       if (next.status === 402) {
         return new Response("{}", {
           status: 402,
@@ -330,4 +334,95 @@ test("an unrecognised claim status refuses to run the work", async () => {
     (err) => /unrecognised status/.test(err.message),
   );
   assert.equal(ran, false, "an unknown status must not run the side effect");
+});
+
+/**
+ * Retry-on-402 tests.
+ *
+ * The facilitator refuses overlapping authorizations from one payer, and a
+ * refused call settles nothing, so retrying is safe. These pin the boundary:
+ * retry when payment is actually possible, never otherwise.
+ */
+test("retries a refused payment and succeeds on a later attempt", async () => {
+  const { fetchImpl, calls } = fakeServer([
+    { status: 402 },
+    { status: 402 },
+    { status: "claimed" },
+  ]);
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  let ran = 0;
+  const out = await client.exactlyOnce(base, async () => {
+    ran++;
+    return { ok: true };
+  });
+
+  assert.equal(out.outcome, "performed");
+  assert.equal(ran, 1, "the work must run exactly once despite the retries");
+  assert.equal(
+    calls.filter((c) => c.path === "/once-key").length,
+    3,
+    "should have attempted the claim three times",
+  );
+});
+
+test("gives up after maxPaymentRetries and reports payment required", async () => {
+  const { fetchImpl, calls } = fakeServer([
+    { status: 402 },
+    { status: 402 },
+    { status: 402 },
+    { status: 402 },
+  ]);
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  await assert.rejects(
+    () => client.exactlyOnce(base, async () => ({ ok: true })),
+    PaymentRequiredError,
+  );
+  // Default is 2 retries, so 3 attempts total — not the 4 that were queued.
+  assert.equal(calls.filter((c) => c.path === "/once-key").length, 3);
+});
+
+test("does not retry when no payment mechanism was supplied", async () => {
+  // Without an x402-aware fetch a 402 recurs forever, so retrying would only
+  // burn time to arrive at the same error.
+  const { fetchImpl, calls } = fakeServer([{ status: 402 }, { status: 402 }]);
+  const globalBefore = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try {
+    const client = new AgenticEndpoints({});
+    await assert.rejects(
+      () => client.exactlyOnce(base, async () => ({ ok: true })),
+      PaymentRequiredError,
+    );
+    assert.equal(calls.filter((c) => c.path === "/once-key").length, 1);
+  } finally {
+    globalThis.fetch = globalBefore;
+  }
+});
+
+test("honours maxPaymentRetries: 0", async () => {
+  const { fetchImpl, calls } = fakeServer([{ status: 402 }, { status: "claimed" }]);
+  const client = new AgenticEndpoints({ fetch: fetchImpl, maxPaymentRetries: 0 });
+
+  await assert.rejects(
+    () => client.exactlyOnce(base, async () => ({ ok: true })),
+    PaymentRequiredError,
+  );
+  assert.equal(calls.filter((c) => c.path === "/once-key").length, 1);
+});
+
+test("preserves the payment challenge across retries", async () => {
+  const { fetchImpl } = fakeServer([{ status: 402 }, { status: 402 }, { status: 402 }]);
+  const client = new AgenticEndpoints({ fetch: fetchImpl });
+
+  await client
+    .exactlyOnce(base, async () => ({ ok: true }))
+    .then(
+      () => assert.fail("should have thrown"),
+      (err) => {
+        assert.ok(err instanceof PaymentRequiredError);
+        assert.equal(err.challenge, "challenge-blob");
+      },
+    );
 });

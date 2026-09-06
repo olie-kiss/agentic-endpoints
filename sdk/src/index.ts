@@ -31,6 +31,24 @@ export interface ClientOptions {
    * endpoint covered by a credit token.
    */
   fetch?: typeof fetch;
+  /**
+   * How many times to re-attempt a paid request that came back 402.
+   *
+   * The facilitator refuses overlapping payment authorizations from a single
+   * payer: with five calls in flight from one wallet, 20-55% are refused.
+   * Measured against the live service, a refused call settles nothing — ten
+   * concurrent calls, eight successes, and a balance delta of exactly eight
+   * times the price. Retrying therefore cannot double-charge, which is the
+   * only reason this is on by default.
+   *
+   * Only applies when an x402-aware `fetch` was supplied. Without one, a 402
+   * means no payment was ever attempted and will recur forever, so retrying
+   * would burn time to reach the same error. Credit-token 402s mean an empty
+   * balance and are equally terminal.
+   *
+   * Set to 0 to disable.
+   */
+  maxPaymentRetries?: number;
 }
 
 export class PaymentRequiredError extends Error {
@@ -230,6 +248,12 @@ export class AgenticEndpoints {
   private readonly baseUrl: string;
   private readonly creditToken?: string;
   private readonly doFetch: typeof fetch;
+  private readonly maxPaymentRetries: number;
+  /**
+   * Whether the caller gave us something that can actually pay per call.
+   * Retrying a 402 is only ever useful in that case.
+   */
+  private readonly canPay: boolean;
 
   constructor(options: ClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? "https://ai.oliverkiss.com").replace(
@@ -238,6 +262,20 @@ export class AgenticEndpoints {
     );
     this.creditToken = options.creditToken;
     this.doFetch = options.fetch ?? globalThis.fetch;
+    this.canPay = options.fetch !== undefined;
+    this.maxPaymentRetries = Math.max(0, options.maxPaymentRetries ?? 2);
+  }
+
+  /**
+   * Backoff before re-attempting a refused payment.
+   *
+   * Jittered on purpose: the refusals come from concurrent authorizations by
+   * one payer, so retrying several failures on a shared schedule would line
+   * them up and reproduce the collision that caused them.
+   */
+  private static backoffMs(attempt: number): number {
+    const base = 200 * 2 ** attempt;
+    return base + Math.random() * base;
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
@@ -246,11 +284,23 @@ export class AgenticEndpoints {
     };
     if (this.creditToken) headers["X-Credit-Token"] = this.creditToken;
 
-    const res = await this.doFetch(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
+    const serialized = JSON.stringify(body);
+    let res!: Response;
+
+    for (let attempt = 0; ; attempt++) {
+      res = await this.doFetch(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers,
+        body: serialized,
+      });
+
+      if (res.status !== 402) break;
+      if (!this.canPay || attempt >= this.maxPaymentRetries) break;
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, AgenticEndpoints.backoffMs(attempt)),
+      );
+    }
 
     if (res.status === 402) {
       // Under x402 v2 the 402 body is legitimately empty and the challenge

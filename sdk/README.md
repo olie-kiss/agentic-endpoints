@@ -93,6 +93,29 @@ Without either, paid endpoints throw `PaymentRequiredError`, which carries
 the raw x402 challenge from the `payment-required` response header. (Under
 x402 v2 the 402 body is legitimately empty — the challenge is in the header.)
 
+### Refused payments are retried
+
+The facilitator will not verify overlapping payment authorizations from a
+single payer. With five calls in flight from one wallet, 20–55% come back
+402. Measured against the live service, **a refused call settles nothing**:
+ten concurrent calls, eight successes, and a balance delta of exactly eight
+times the price. Retrying cannot double-charge, which is the only reason it
+is on by default.
+
+Two retries, jittered — the collisions come from one payer's concurrent
+authorizations, so retrying on a shared schedule would line them back up.
+
+```ts
+new AgenticEndpoints({ fetch: paidFetch, maxPaymentRetries: 0 }); // opt out
+```
+
+This only applies when you supplied an x402-aware `fetch`. With no payment
+mechanism, or with an empty credit balance, a 402 is terminal and recurs
+forever, so it is surfaced immediately rather than retried.
+
+If you need many paid calls at once, prefer credits: they carry no per-call
+signature to verify, so they sidestep the collision entirely.
+
 ## Deciding whether to depend on this
 
 ```ts
