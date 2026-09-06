@@ -1,5 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { OUTPUT_SCHEMAS, toStructuredContent } from "../src/handlers/mcp";
 
 const PROTOCOL = "2026-07-28";
 
@@ -169,6 +170,55 @@ describe("MCP tools", () => {
     expect(byName.scrape.openWorldHint).toBe(true);
     expect(byName.pdf_parse.openWorldHint).toBe(true);
     expect(byName.compress.openWorldHint).toBe(false);
+  });
+
+  /**
+   * Declaring outputSchema obliges us to return structuredContent on success.
+   * Shipping the schema without the payload would be worse than shipping
+   * neither, because a validating client would have nothing to check.
+   */
+  it("declares an output schema for every tool, and no orphans", async () => {
+    const { json } = await rpc("tools/list");
+    const names = json.result.tools.map((t: any) => t.name).sort();
+
+    for (const tool of json.result.tools) {
+      expect(tool.outputSchema, tool.name).toBeDefined();
+      expect(tool.outputSchema.type, tool.name).toBe("object");
+      expect(Array.isArray(tool.outputSchema.required), tool.name).toBe(true);
+      expect(tool.outputSchema.required.length, tool.name).toBeGreaterThan(0);
+
+      // Every required field must actually be described, or the schema
+      // promises something it never explains.
+      for (const key of tool.outputSchema.required) {
+        expect(tool.outputSchema.properties[key], `${tool.name}.${key}`).toBeDefined();
+      }
+    }
+
+    expect(Object.keys(OUTPUT_SCHEMAS).sort()).toEqual(names);
+  });
+
+  it("returns structuredContent on success, and never on an error", async () => {
+    // The rule is unit-tested directly: there is no free tool that succeeds
+    // without paid setup, so exercising it over HTTP would cost money.
+    expect(toStructuredContent('{"status":"completed"}', true)).toEqual({ status: "completed" });
+
+    // Errors are exempt from the structured-content requirement, and an error
+    // body must not be presented as if it satisfied the output schema.
+    expect(toStructuredContent('{"error":"nope"}', false)).toBeUndefined();
+
+    // Bodies that are not JSON objects must not be coerced into a shape.
+    expect(toStructuredContent("plain text", true)).toBeUndefined();
+    expect(toStructuredContent("[1,2,3]", true)).toBeUndefined();
+    expect(toStructuredContent("null", true)).toBeUndefined();
+  });
+
+  it("does not attach structuredContent to an unpaid 402", async () => {
+    const { json } = await rpc("tools/call", {
+      name: "scrape",
+      arguments: { url: "https://example.com" },
+    });
+    expect(json.result.isError).toBe(true);
+    expect(json.result.structuredContent).toBeUndefined();
   });
 
   it("states a price on every tool, including the free ones", async () => {

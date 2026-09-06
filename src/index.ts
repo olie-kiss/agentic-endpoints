@@ -820,7 +820,7 @@ export function buildRoutes(env: Env): RoutesConfig {
               {
                 meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
                 title: "Pricing review",
-                excerpt: "we agreed to hold at [pricing] of $9 a month…",
+                excerpt: "we agreed to defer the [pricing] change until Q3…",
               },
             ],
             searched_meetings: 12,
@@ -860,7 +860,7 @@ export function buildRoutes(env: Env): RoutesConfig {
             meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
             title: "Pricing review",
             visibility: "queryable",
-            transcript: "Alice: we agreed to hold at $9 a month...",
+            transcript: "Alice: we agreed to defer the pricing change until Q3...",
           },
         },
       }),

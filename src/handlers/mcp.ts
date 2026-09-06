@@ -472,6 +472,294 @@ const TOOLS: ToolDef[] = [
 ];
 
 /**
+ * Declared response shapes, one per tool.
+ *
+ * A tool that returns undocumented JSON forces the calling model to guess at
+ * field names, which is how chains break in ways nobody can debug. Declaring
+ * `outputSchema` also obliges us to return `structuredContent` on success —
+ * see tools/call, where the upstream body is parsed rather than only being
+ * handed back as text.
+ *
+ * These are deliberately permissive: `required` lists only fields present on
+ * every success, and extra properties are allowed. An over-tight schema would
+ * make a client reject a response that is perfectly valid.
+ */
+const s = (description: string) => ({ type: "string", description });
+const n = (description: string) => ({ type: "number", description });
+const b = (description: string) => ({ type: "boolean", description });
+
+export const OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
+  meetings_search: {
+    type: "object",
+    properties: {
+      status: s("'ok' on a successful search"),
+      query: s("The match expression that was run"),
+      count: n("Number of matches returned"),
+      matches: {
+        type: "array",
+        description: "Ranked excerpts, best first",
+        items: {
+          type: "object",
+          properties: {
+            meeting_id: s("Pass to meetings_get to read the full transcript"),
+            title: s("Meeting title"),
+            excerpt: s("Matching passage"),
+          },
+        },
+      },
+      searched_meetings: n(
+        "How many meetings were actually searched. If 0, an empty result means nothing was searchable, NOT that the topic was never discussed.",
+      ),
+      private_meetings_skipped: n("Encrypted meetings that could not be searched"),
+    },
+    required: ["status", "count", "matches"],
+  },
+
+  meetings_import: {
+    type: "object",
+    properties: {
+      status: s("'imported' on success"),
+      meeting_id: s("Identifier for later meetings_get calls"),
+      visibility: s("'queryable' or 'private'"),
+      searchable: b("False for private meetings, which are never searchable"),
+      size_bytes: n("Stored size"),
+      namespace_token: s("Issued only on the first import into a namespace, shown exactly once"),
+      note: s("Present alongside a newly issued namespace_token"),
+    },
+    required: ["status", "meeting_id"],
+  },
+
+  meetings_get: {
+    type: "object",
+    properties: {
+      status: s("'ok' on success"),
+      meeting_id: s("Identifier of the meeting"),
+      title: s("Meeting title"),
+      visibility: s("'queryable' or 'private'"),
+      transcript: s("Plaintext transcript, for queryable meetings"),
+      ciphertext: s("Client-encrypted transcript, for private meetings"),
+    },
+    required: ["status", "meeting_id"],
+  },
+
+  meetings_list: {
+    type: "object",
+    properties: {
+      status: s("'ok' on success"),
+      count: n("Number of meetings returned"),
+      meetings: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            meeting_id: s("Identifier"),
+            title: s("Meeting title"),
+            visibility: s("'queryable' or 'private'"),
+            searchable: b("Whether this meeting can be searched"),
+          },
+        },
+      },
+    },
+    required: ["status", "count", "meetings"],
+  },
+
+  once_key_claim: {
+    type: "object",
+    properties: {
+      status: {
+        type: "string",
+        description:
+          "'claimed' means you own the action and must perform it. 'duplicate' means someone already did: do NOT repeat the side effect, use `result` instead.",
+      },
+      namespace: s("Isolation scope"),
+      action_key: s("The key that was claimed"),
+      claimed_at: s("ISO-8601 claim time"),
+      lease_expires_at: s("Call once_key_complete before this or the claim may be taken over"),
+      expires_at: s("ISO-8601 expiry of the claim record"),
+      receipt: s("Payment receipt"),
+      result: {
+        description: "The recorded result, present when status is 'duplicate'.",
+      },
+      has_result: b("Distinguishes a recorded null result from no result at all"),
+      namespace_token: s("Issued only on the first claim in a namespace, shown exactly once"),
+      note: s("Present alongside a newly issued namespace_token"),
+    },
+    required: ["status", "action_key"],
+  },
+
+  once_key_complete: {
+    type: "object",
+    properties: {
+      status: s("'completed'"),
+      action_key: s("The key whose outcome was recorded"),
+      completed_at: s("ISO-8601 completion time"),
+      expires_at: s("When the recorded result is discarded"),
+      result: { description: "The stored result, replayed to later claimants." },
+      has_result: b("Distinguishes a recorded null result from no result at all"),
+    },
+    required: ["status", "action_key"],
+  },
+
+  once_key_release: {
+    type: "object",
+    properties: {
+      status: s("'released'"),
+      action_key: s("The key that was surrendered"),
+    },
+    required: ["status", "action_key"],
+  },
+
+  vault_store: {
+    type: "object",
+    properties: {
+      status: s("'stored'"),
+      namespace: s("Isolation scope"),
+      key: s("The key that was written"),
+      alg: s("Algorithm label you supplied; the service never decrypts"),
+      size_bytes: n("Stored ciphertext size"),
+      created_at: s("ISO-8601 creation time"),
+      updated_at: s("ISO-8601 last write"),
+      expires_at: { type: ["string", "null"], description: "Expiry, or null if it never expires" },
+      namespace_token: s("Issued only on the first store into a namespace, shown exactly once"),
+      receipt: s("Payment receipt"),
+    },
+    required: ["status", "key"],
+  },
+
+  vault_retrieve: {
+    type: "object",
+    properties: {
+      status: s("'retrieved'"),
+      namespace: s("Isolation scope"),
+      key: s("The key that was read"),
+      ciphertext: s("Exactly the bytes you stored. Decrypt these yourself."),
+      alg: s("Algorithm label you supplied at store time"),
+      created_at: s("ISO-8601 creation time"),
+      updated_at: s("ISO-8601 last write"),
+      expires_at: { type: ["string", "null"], description: "Expiry, or null if it never expires" },
+      receipt: s("Payment receipt"),
+    },
+    required: ["status", "key", "ciphertext"],
+  },
+
+  vault_exists: {
+    type: "object",
+    properties: {
+      exists: b("Whether the key is present. Cheaper than a retrieve."),
+      namespace: s("Isolation scope"),
+      key: s("The key that was checked"),
+    },
+    required: ["exists", "key"],
+  },
+
+  vault_delete: {
+    type: "object",
+    properties: {
+      status: s("'deleted'"),
+      namespace: s("Isolation scope"),
+      key: s("The key that was removed"),
+    },
+    required: ["status", "key"],
+  },
+
+  vault_list: {
+    type: "object",
+    properties: {
+      status: s("'listed'"),
+      count: n("Number of entries"),
+      items: {
+        type: "array",
+        description: "Metadata only — ciphertext is never included here",
+        items: {
+          type: "object",
+          properties: {
+            key: s("Entry key"),
+            alg: s("Algorithm label"),
+            size_bytes: n("Stored size"),
+            created_at: s("ISO-8601 creation time"),
+            updated_at: s("ISO-8601 last write"),
+            expires_at: { type: ["string", "null"], description: "Expiry, or null" },
+          },
+        },
+      },
+    },
+    required: ["status", "count", "items"],
+  },
+
+  vault_rotate_token: {
+    type: "object",
+    properties: {
+      status: s("'rotated'"),
+      namespace_token: s("The new token, shown exactly once. The previous one stops working."),
+      notice: s("Human-readable warning that the old token is now invalid"),
+    },
+    required: ["status", "namespace_token"],
+  },
+
+  pdf_parse: {
+    type: "object",
+    properties: {
+      url: s("The PDF that was fetched"),
+      page_count: n("Pages extracted"),
+      pages: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { page: n("1-based page number"), text: s("Text on that page") },
+        },
+      },
+      extracted_at: s("ISO-8601 extraction time"),
+    },
+    required: ["url", "page_count", "pages"],
+  },
+
+  scrape: {
+    type: "object",
+    properties: {
+      url: s("The page that was fetched"),
+      title: s("Document title, when the page has one"),
+      content: s("Extracted content in the requested format"),
+      format: s("'text', 'markdown' or 'html', echoing your request"),
+      extracted_at: s("ISO-8601 fetch time"),
+    },
+    required: ["url", "content"],
+  },
+
+  compress: {
+    type: "object",
+    properties: {
+      original_length: n("Input length in characters"),
+      compressed_length: n("Output length in characters"),
+      ratio: n("compressed_length / original_length. Lower is more aggressive."),
+      text: s("The compressed text"),
+      strategy: s("Strategy applied, echoing your request"),
+    },
+    required: ["original_length", "compressed_length", "ratio", "text"],
+  },
+};
+
+/**
+ * Decides whether an upstream body can be surfaced as `structuredContent`.
+ *
+ * Extracted so the rule is testable without a paid call: every tool declares
+ * an outputSchema, so successes must carry structured data, but errors are
+ * exempt and a non-JSON-object body must not be coerced into a shape it does
+ * not have.
+ */
+export function toStructuredContent(text: string, ok: boolean): unknown {
+  if (!ok) return undefined;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Not JSON; the caller still returns the raw text block.
+  }
+  return undefined;
+}
+
+/**
  * Dispatches a request back through the full request pipeline in-process, so
  * tool calls pass the same payment gate, body cap and validation as a direct
  * HTTP caller. Injected by the router to avoid an import cycle.
@@ -649,6 +937,7 @@ app.post("/", async (c) => {
               ? `${t.description} This tool is free; no payment is required.`
               : `${t.description} Costs ${t.price} in USDC on Base, paid via the x402 protocol.`,
           inputSchema: t.inputSchema,
+          outputSchema: OUTPUT_SCHEMAS[t.name],
           annotations: t.annotations,
         })),
         // The catalogue is identical for every caller and changes only on
@@ -725,10 +1014,23 @@ app.post("/", async (c) => {
         });
       }
 
+      /**
+       * Because every tool declares an `outputSchema`, a successful result
+       * MUST carry `structuredContent` — a client that validates against the
+       * schema has nothing to validate otherwise. The text block is retained
+       * alongside it for clients that only render content.
+       *
+       * Errors are exempt from the structured requirement, and an upstream
+       * body that is not JSON (or is not a JSON object) is passed through as
+       * text rather than being coerced into a shape it does not have.
+       */
+      const structured = toStructuredContent(text, upstream.ok);
+
       return rpcResult(id, {
         resultType: "complete",
         isError: !upstream.ok,
         content: [{ type: "text", text }],
+        ...(structured === undefined ? {} : { structuredContent: structured }),
       });
     }
 
