@@ -120,7 +120,8 @@ CDP Bazaar is skipped for exactly that reason.
 | x402-list.com | Submitted, pending review | `POST /api/v1/submit`; free because the service is on a custom domain |
 | Official MCP Registry | **Published — `com.oliverkiss/agentic-endpoints`, status active** | `./scripts/publish-registry.sh`. Ownership proven by an apex TXT record and an ed25519-signed timestamp, so no financial account is involved |
 | npm | **Published — [`agentic-endpoints`](https://www.npmjs.com/package/agentic-endpoints)** | `cd sdk && npm publish`. Counts as discovery, not just convenience: npm is crawled by every AI coding assistant, so the client is findable by the same models that would use the service |
-| Smithery | **Published — [`kiss-olie/agentic-endpoints`](https://smithery.ai/servers/kiss-olie/agentic-endpoints)** | `smithery auth login` then `smithery mcp publish https://ai.oliverkiss.com/mcp -n kiss-olie/agentic-endpoints`. The scan found all 12 tools. Note the namespace is `kiss-olie`, not the GitHub handle. Publishing leaves `description` empty and the CLI has no flag for it, which makes the listing unsearchable — set it with `PATCH https://api.smithery.ai/servers/kiss-olie%2Fagentic-endpoints` |
+| Smithery | **Published — [`kiss-olie/agentic-endpoints`](https://smithery.ai/servers/kiss-olie/agentic-endpoints)**, quality **98/100** | `npx -y @smithery/cli@latest mcp publish "https://ai.oliverkiss.com/mcp" -n kiss-olie/agentic-endpoints` — **no auth needed**, and it updates in place. The scan finds all 16 tools. Note the namespace is `kiss-olie`, not the GitHub handle. Their registry API and the markdown view served to non-browser clients are both **badly stale** (still report 12 tools and the old favicon); only the browser-rendered page is current, so verify there |
+| Glama | Not listed; **claim file pre-placed** | `glama.json` at the repo root (`maintainers: ["olie-kiss"]`, schema `glama.ai/mcp/schemas/server.json`) claims the listing automatically if their GitHub crawler indexes us. The separate `/.well-known/glama.json` is a *different* schema (`connector.json`, an opaque `glama_claim_` token) for remote connectors and needs a listing to exist first |
 
 Aggregators such as PulseMCP ingest from the official registry, so publishing
 there covers several directories at once. The repository is public, so
@@ -154,6 +155,44 @@ genesis; scanning millions of blocks through a public RPC node would fail
 repeatedly and never establish a watermark at all. The watermark advances only
 on a successful scan, so a transient RPC failure is retried on the next tick
 with nothing missed.
+
+### Buyer signals
+
+Revenue monitoring only sees money that *arrived*. The service takes thousands
+of requests a day and, so far, no revenue — and reviewing the callers, almost
+all of it is liveness probes, trust scanners and directory crawlers, which are
+indistinguishable from a customer in an access log. The gap that leaves is a
+genuine buyer being refused for a fixable reason and leaving without ever
+appearing as a distinguishable line.
+
+`src/lib/tripwire.ts` emits one structured line per notable request:
+
+```bash
+npx wrangler tail --format json | grep BUYER_SIGNAL
+```
+
+| Signal | Meaning | Confidence |
+|---|---|---|
+| `payment_attempt` | Carried a payment authorization | high |
+| `credit_use` | An existing customer spending prepaid credit | high |
+| `prospect_402` | An unrecognised caller hit a priced route | low |
+
+It keys on **behaviour, not identity**. A monitor never carries a payment
+authorization, so anything that does is trying to buy — and that holds even
+when the `User-Agent` claims to be a bot. `User-Agent` only suppresses known
+noise and grants nothing, because it is forged for free.
+
+Note that the SDK inherits Node's `User-Agent`, which is exactly what an
+anonymous script sends, so **no string positively identifies a customer**.
+Anything unrecognised stays `unclassified` rather than being written off; the
+tests pin this, since misfiling it would suppress the one signal worth having.
+`prospect_402` is a guess and is marked low confidence for that reason — it
+should never be read as a sale.
+
+The check runs ahead of the credit and x402 gates, both of which answer without
+reaching application code, because a refusal is precisely the event worth
+recording. No header values are logged and the caller IP is dropped in favour
+of the country Cloudflare already derived.
 
 ## Published SLOs
 
@@ -511,6 +550,13 @@ retry with a fresh signature. If you need throughput, issue paid calls
 sequentially, or retry on `402` with a short backoff. Do not treat a `402` as a
 charge you need to reconcile.
 
+Since **0.4.0 the SDK does this for you**: `post()` replays a `402` twice by
+default, with jittered backoff, and `maxPaymentRetries` tunes it. Jitter is not
+decoration — the colliding requests belong to a single payer, so a fixed delay
+would realign them on the next attempt. Retries only happen when you supplied
+an x402-aware `fetch`; the SDK never signs payments itself, so without one a
+`402` is terminal and is surfaced immediately rather than stalling.
+
 ## Security Notes
 
 - **URL-taking endpoints are SSRF-guarded** (`src/lib/url-guard.ts`): scheme
@@ -596,6 +642,16 @@ services such as Mercury and Sphere Pay are not an option.
 - **No evidence of demand.** `/stats` records the funnel precisely so that
   "nobody has found us" and "agents arrive and refuse to pay" stop looking
   identical. So far the answer is the first one.
+- **No A2A Agent Card, deliberately.** Crawlers request
+  `/.well-known/agent-card.json` and `/.well-known/agent.json` roughly 80 times
+  a day and get a `404`, which is the correct answer. Under A2A v1.0 a card is
+  a binding declaration, not a description: §8.3.1 requires each interface to
+  "accurately declare its transport protocol and URL", §8.3.2 obliges clients
+  to call it, and §5.1/§3.1 make a declared interface owe all 11 operations
+  (`SendMessage`, `GetTask`, `ListTasks`, `CancelTask`, …). This is an MCP
+  server, not an A2A agent. Publishing a card would advertise a broken agent to
+  every A2A crawler and registry — strictly worse than the `404`. Revisit only
+  alongside a real A2A binding.
 - **`/scrape`, `/pdf-parse` and `/compress` compete with free libraries.** The
   defensible endpoints are `/once-key` and `/vault`: coordination primitives a
   single agent cannot self-host, because they answer questions about what
