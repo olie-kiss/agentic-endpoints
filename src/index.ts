@@ -21,6 +21,7 @@ import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
 import creditsHandler, { creditsStub } from "./handlers/credits";
 import { hashToken, timingSafeEqual } from "./lib/utils";
+import { classifyCaller, detectSignal, recordBuyerSignal } from "./lib/tripwire";
 import {
   buildLlmsTxt,
   buildOpenApi,
@@ -1284,6 +1285,29 @@ async function handleRequest(
     const isPaidPath = Object.keys(routes).some(
       (route) => route.replace(/^[A-Z]+\s+/, "") === path,
     );
+
+    /**
+     * Buyer detection, ahead of the credit and x402 gates so that a refusal
+     * is still observed. Both gates can answer without reaching application
+     * code, which is precisely the case worth knowing about.
+     */
+    if (!internal) {
+      const signal = detectSignal(
+        isPaidPath,
+        request.headers.has("X-PAYMENT"),
+        request.headers.has("X-Credit-Token"),
+        classifyCaller(request.headers.get("User-Agent")),
+      );
+      if (signal) {
+        recordBuyerSignal(signal, {
+          path,
+          method: request.method,
+          userAgent: request.headers.get("User-Agent"),
+          country: (request as { cf?: { country?: string } }).cf?.country ?? null,
+        });
+      }
+    }
+
     if (!isPaidPath) {
       return app.fetch(request, env, ctx);
     }
