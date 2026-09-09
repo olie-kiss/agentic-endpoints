@@ -22,6 +22,7 @@ import mcpHandler, { type Dispatcher } from "./handlers/mcp";
 import creditsHandler, { creditsStub } from "./handlers/credits";
 import { hashToken, timingSafeEqual } from "./lib/utils";
 import { classifyCaller, detectSignal, recordBuyerSignal, SIGNAL_CONFIDENCE } from "./lib/tripwire";
+import { suppressBazaarSchemaNoise } from "./lib/log-noise";
 import {
   buildLlmsTxt,
   buildOpenApi,
@@ -1368,6 +1369,7 @@ async function handleRequest(
     // on every request fired one outbound subrequest to the facilitator for
     // every inbound request, including free ones and 404s.
     if (!gatedApp) {
+      suppressBazaarSchemaNoise();
       const facilitatorClient = new HTTPFacilitatorClient({
         url: env.FACILITATOR_URL ?? "https://facilitator.payai.network",
       });
