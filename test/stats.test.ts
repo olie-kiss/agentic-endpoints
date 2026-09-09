@@ -191,3 +191,61 @@ describe("public SLO endpoint", () => {
     expect(body.measured_by).toContain("cron");
   });
 });
+
+describe("buyer signals survive in storage", () => {
+  it("counts every signal but keeps detail only for the high-confidence ones", async () => {
+    const stub = ledger("signals-detail");
+
+    await runInDurableObject(stub, (i: Stats) =>
+      i.recordSignal("payment_attempt", "high", "/compress", "some-agent/1.0", "CA"),
+    );
+    await runInDurableObject(stub, (i: Stats) =>
+      i.recordSignal("prospect_402", "low", "/scrape", "curl/8", "US"),
+    );
+
+    const summary = await runInDurableObject(stub, (i: Stats) => i.summary());
+
+    expect(summary.buyer_signals.payment_attempt).toBe(1);
+    expect(summary.buyer_signals.prospect_402).toBe(1);
+
+    // The point of the split: thousands of low-confidence crawler rows must
+    // not be able to bury the one line that matters.
+    expect(summary.buyer_signals.recent).toHaveLength(1);
+    expect(summary.buyer_signals.recent[0].signal).toBe("payment_attempt");
+    expect(summary.buyer_signals.recent[0].path).toBe("/compress");
+    expect(summary.buyer_signals.recent[0].country).toBe("CA");
+  });
+
+  it("does not evict a lone payment attempt behind later noise", async () => {
+    // The failure this guards against: a first customer appears, months of
+    // crawler traffic follow, and the only evidence is aged out.
+    const stub = ledger("signals-eviction");
+
+    await runInDurableObject(stub, (i: Stats) =>
+      i.recordSignal("payment_attempt", "high", "/vault/store", "first-buyer/1.0", "DE"),
+    );
+    for (let n = 0; n < 200; n++) {
+      await runInDurableObject(stub, (i: Stats) =>
+        i.recordSignal("prospect_402", "low", "/scrape", "crawler/1.0", "US"),
+      );
+    }
+
+    const summary = await runInDurableObject(stub, (i: Stats) => i.summary());
+
+    expect(summary.buyer_signals.prospect_402).toBe(200);
+    expect(
+      summary.buyer_signals.recent.some((e) => e.ua === "first-buyer/1.0"),
+    ).toBe(true);
+  });
+
+  it("reports zeroes rather than absent fields before anything happens", async () => {
+    // A missing field and a zero read the same in a dashboard; only one of
+    // them means "asked and answered".
+    const stub = ledger("signals-empty");
+    const summary = await runInDurableObject(stub, (i: Stats) => i.summary());
+
+    expect(summary.buyer_signals.payment_attempt).toBe(0);
+    expect(summary.buyer_signals.credit_use).toBe(0);
+    expect(summary.buyer_signals.recent).toEqual([]);
+  });
+});

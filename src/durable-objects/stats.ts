@@ -65,6 +65,35 @@ export class Stats extends DurableObject<Env> {
         ts TEXT PRIMARY KEY
       )
     `);
+    // Buyer signals, aggregated. The tripwire writes to the log, which is only
+    // readable while someone is tailing it: a first customer arriving
+    // overnight would leave a line nobody read and it would then age out.
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS signals (
+        day    TEXT NOT NULL,
+        signal TEXT NOT NULL,
+        count  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, signal)
+      )
+    `);
+    /**
+     * Detail for high-confidence signals only.
+     *
+     * A count answers "did anyone try to pay"; the first time that happens
+     * the useful question is immediately "who, and what did they ask for",
+     * which a counter cannot answer. Kept for `payment_attempt` and
+     * `credit_use` alone — `prospect_402` is already in the thousands and its
+     * detail is the crawler noise this table exists to see past.
+     */
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS signal_events (
+        ts      TEXT PRIMARY KEY,
+        signal  TEXT NOT NULL,
+        path    TEXT NOT NULL,
+        ua      TEXT,
+        country TEXT
+      )
+    `);
     this.initialized = true;
   }
 
@@ -117,6 +146,57 @@ export class Stats extends DurableObject<Env> {
       .slice(0, 10);
     this.ctx.storage.sql.exec(`DELETE FROM hits WHERE day < ?`, cutoff);
     this.ctx.storage.sql.exec(`DELETE FROM latency WHERE day < ?`, cutoff);
+  }
+
+  /**
+   * Records a buyer signal.
+   *
+   * Split deliberately: the aggregate is what makes "has anyone ever tried to
+   * pay" answerable from a single read, while the event detail is bounded to
+   * the high-confidence signals so that thousands of crawler `prospect_402`
+   * rows cannot bury the one line that matters.
+   */
+  async recordSignal(
+    signal: string,
+    confidence: string,
+    path: string,
+    ua: string | null,
+    country: string | null,
+  ): Promise<void> {
+    this.ensureTable();
+    const now = new Date().toISOString();
+    const day = now.slice(0, 10);
+
+    this.ctx.storage.sql.exec(
+      `INSERT INTO signals (day, signal, count) VALUES (?, ?, 1)
+       ON CONFLICT (day, signal) DO UPDATE SET count = count + 1`,
+      day,
+      signal,
+    );
+
+    if (confidence === "high") {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO signal_events (ts, signal, path, ua, country)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT (ts) DO NOTHING`,
+        now,
+        signal,
+        path,
+        ua,
+        country,
+      );
+      // Bounded by count, not age: the first payment attempt could be the
+      // only one for months and must not be evicted for being old.
+      this.ctx.storage.sql.exec(
+        `DELETE FROM signal_events WHERE ts NOT IN (
+           SELECT ts FROM signal_events ORDER BY ts DESC LIMIT 100
+         )`,
+      );
+    }
+
+    const cutoff = new Date(Date.now() - 90 * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    this.ctx.storage.sql.exec(`DELETE FROM signals WHERE day < ?`, cutoff);
   }
 
   /**
@@ -272,6 +352,26 @@ export class Stats extends DurableObject<Env> {
     const challenged = totals.challenged ?? 0;
     const paid = totals.paid ?? 0;
 
+    const signalRows = this.ctx.storage.sql
+      .exec("SELECT signal, count FROM signals")
+      .toArray() as unknown as { signal: string; count: number }[];
+    const signalTotals: Record<string, number> = {};
+    for (const s of signalRows) {
+      signalTotals[s.signal] = (signalTotals[s.signal] ?? 0) + s.count;
+    }
+
+    const signalEvents = this.ctx.storage.sql
+      .exec(
+        "SELECT ts, signal, path, ua, country FROM signal_events ORDER BY ts DESC LIMIT 20",
+      )
+      .toArray() as unknown as {
+        ts: string;
+        signal: string;
+        path: string;
+        ua: string | null;
+        country: string | null;
+      }[];
+
     return {
       totals: {
         requests: Object.values(totals).reduce((a, b) => a + b, 0),
@@ -294,6 +394,18 @@ export class Stats extends DurableObject<Env> {
       ),
       first_seen: meta.first_seen ?? null,
       last_seen: meta.last_seen ?? null,
+      /**
+       * Whether anyone has ever tried to pay, as opposed to merely arriving.
+       * `attempts` counts requests carrying a payment authorization or spending
+       * prepaid credit; `prospects` counts unrecognised callers that hit a
+       * priced route and is a guess, not a sale.
+       */
+      buyer_signals: {
+        payment_attempt: signalTotals.payment_attempt ?? 0,
+        credit_use: signalTotals.credit_use ?? 0,
+        prospect_402: signalTotals.prospect_402 ?? 0,
+        recent: signalEvents,
+      },
     };
   }
 }
@@ -388,4 +500,16 @@ export interface StatsSummary {
   by_day: Record<string, number>;
   first_seen: string | null;
   last_seen: string | null;
+  buyer_signals: {
+    payment_attempt: number;
+    credit_use: number;
+    prospect_402: number;
+    recent: {
+      ts: string;
+      signal: string;
+      path: string;
+      ua: string | null;
+      country: string | null;
+    }[];
+  };
 }

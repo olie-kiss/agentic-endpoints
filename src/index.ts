@@ -21,7 +21,7 @@ import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
 import creditsHandler, { creditsStub } from "./handlers/credits";
 import { hashToken, timingSafeEqual } from "./lib/utils";
-import { classifyCaller, detectSignal, recordBuyerSignal } from "./lib/tripwire";
+import { classifyCaller, detectSignal, recordBuyerSignal, SIGNAL_CONFIDENCE } from "./lib/tripwire";
 import {
   buildLlmsTxt,
   buildOpenApi,
@@ -1299,12 +1299,29 @@ async function handleRequest(
         classifyCaller(request.headers.get("User-Agent")),
       );
       if (signal) {
+        const ua = request.headers.get("User-Agent");
+        const country =
+          (request as { cf?: { country?: string } }).cf?.country ?? null;
         recordBuyerSignal(signal, {
           path,
           method: request.method,
-          userAgent: request.headers.get("User-Agent"),
-          country: (request as { cf?: { country?: string } }).cf?.country ?? null,
+          userAgent: ua,
+          country,
         });
+        // Also persisted: the log line is only readable while someone is
+        // tailing, so on its own it would miss a first customer who arrived
+        // overnight.
+        background(
+          ctx,
+          "record buyer signal",
+          statsStub(env).recordSignal(
+            signal,
+            SIGNAL_CONFIDENCE[signal],
+            path,
+            ua?.slice(0, 120) ?? null,
+            country,
+          ),
+        );
       }
     }
 
@@ -1650,6 +1667,13 @@ export function statsStub(env: Env) {
   // would mean merging shards on every read for no benefit at this volume.
   return env.STATS.get(env.STATS.idFromName("global")) as unknown as {
     record(path: string, outcome: Outcome, durationMs?: number): Promise<void>;
+    recordSignal(
+      signal: string,
+      confidence: string,
+      path: string,
+      ua: string | null,
+      country: string | null,
+    ): Promise<void>;
     summary(): Promise<StatsSummary>;
     slo(): Promise<Slo>;
     heartbeat(): Promise<void>;
