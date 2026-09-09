@@ -44,10 +44,13 @@ describe("landing page", () => {
       expect(html, `${path} missing from landing page`).toContain(path);
       // The price must appear in that route's own row, not merely somewhere
       // on the page — otherwise any two routes sharing a price would pass.
+      // Bound the row at the start of the next one rather than a fixed
+      // number of characters, so a longer description cannot push the price
+      // out of view and fail a page that is actually correct.
       const row = html.slice(html.indexOf(`>${path}<`));
-      const rowEnd = row.indexOf("</div>\n      </div>");
+      const rowEnd = row.indexOf('<div class="endpoint">');
       expect(
-        row.slice(0, rowEnd === -1 ? 400 : rowEnd + 60),
+        rowEnd === -1 ? row : row.slice(0, rowEnd),
         `${path} is not advertised at ${price}`,
       ).toContain(price);
     }

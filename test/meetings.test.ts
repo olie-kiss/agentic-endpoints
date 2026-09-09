@@ -285,3 +285,136 @@ describe("meeting namespace ownership", () => {
     expect(String(res.json.error)).toContain("guessable");
   });
 });
+
+describe("importing real transcript exports", () => {
+  // A Zoom-shaped WebVTT export: header, cue ids, voice spans, and a sentence
+  // split across cues on timing rather than grammar.
+  const ZOOM_VTT = `WEBVTT
+
+1
+00:00:04.120 --> 00:00:07.880
+<v Alice>we agreed to ship the redesign
+
+2
+00:00:07.900 --> 00:00:09.400
+<v Alice>before the security audit
+
+3
+00:00:09.500 --> 00:00:12.000
+<v Bob>that works for me
+`;
+
+  it("makes a WebVTT export searchable without the caller writing a parser", async () => {
+    // The adoption blocker this closes: previously an agent holding a Zoom
+    // export had to write a parser before it could spend anything.
+    const n = ns();
+    const { token } = await claimed(n);
+
+    const imported = await meetings(n, "/import", {
+      namespace: n,
+      namespace_token: token,
+      title: "Pricing review",
+      visibility: "queryable",
+      source: "webvtt",
+      transcript: ZOOM_VTT,
+    });
+
+    expect(imported.status).toBe(200);
+    expect((imported.json.parsed as Record<string, unknown>).format).toBe(
+      "webvtt",
+    );
+
+    const found = await meetings(n, "/search", {
+      namespace: n,
+      namespace_token: token,
+      query: "security audit",
+    });
+    const results = found.json.matches as Record<string, unknown>[];
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.some((r) => r.meeting_id === imported.json.meeting_id)).toBe(
+      true,
+    );
+  });
+
+  it("matches a phrase the export split across two cues", async () => {
+    // Cue boundaries follow timing, not grammar. Without merging, "redesign
+    // before the security audit" spans a boundary and matches nothing.
+    const n = ns();
+    const { token } = await claimed(n);
+
+    await meetings(n, "/import", {
+      namespace: n,
+      namespace_token: token,
+      title: "Pricing review",
+      visibility: "queryable",
+      transcript: ZOOM_VTT,
+    });
+
+    const found = await meetings(n, "/search", {
+      namespace: n,
+      namespace_token: token,
+      query: "redesign before the security audit",
+    });
+    expect((found.json.matches as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  it("adds speakers found in the file to the declared participants", async () => {
+    // The caller may know about attendees who never spoke, so the two are
+    // merged rather than one replacing the other.
+    const n = ns();
+    const { token } = await claimed(n);
+
+    const imported = await meetings(n, "/import", {
+      namespace: n,
+      namespace_token: token,
+      title: "Pricing review",
+      visibility: "queryable",
+      participants: ["Carol"],
+      transcript: ZOOM_VTT,
+    });
+
+    expect(imported.json.participants).toEqual(["Carol", "Alice", "Bob"]);
+  });
+
+  it("still accepts plain text exactly as before", async () => {
+    // Importers must not break callers that predate them.
+    const n = ns();
+    const { token } = await claimed(n);
+
+    const imported = await meetings(n, "/import", {
+      namespace: n,
+      namespace_token: token,
+      title: "Notes",
+      visibility: "queryable",
+      transcript: "Alice said we would ship the redesign.",
+    });
+
+    expect(imported.status).toBe(200);
+    expect(imported.json.parsed).toBeUndefined();
+
+    const found = await meetings(n, "/search", {
+      namespace: n,
+      namespace_token: token,
+      query: "redesign",
+    });
+    expect((found.json.matches as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  it("never parses a private meeting", async () => {
+    // The body is ciphertext this service cannot read; parsing it would be
+    // futile and would contradict what the mode promises.
+    const n = ns();
+    const { token } = await claimed(n);
+
+    const imported = await meetings(n, "/import", {
+      namespace: n,
+      namespace_token: token,
+      title: "Sensitive",
+      visibility: "private",
+      ciphertext: ZOOM_VTT,
+    });
+
+    expect(imported.status).toBe(200);
+    expect(imported.json.parsed).toBeUndefined();
+  });
+});

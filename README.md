@@ -503,6 +503,37 @@ happened.
 Via MCP the same thing is `meetings_search`, `meetings_import`, `meetings_get`
 and `meetings_list`.
 
+### Importing a raw export
+
+`transcript` accepts a WebVTT or SRT file exactly as Zoom, Teams, Meet or a
+notetaker emits it — header, cue numbers, timestamps and `<v Speaker>` spans
+included. You do not have to write a parser first.
+
+The format is detected from the content, not from `source`; that field is a
+hint and is ignored when it disagrees with the file. Timestamps and cue
+numbering are stripped before indexing, and consecutive cues from the same
+speaker are merged, because exports split on timing rather than grammar:
+
+```
+00:00:04.120 --> 00:00:07.880   <v Alice>we agreed to ship the redesign
+00:00:07.900 --> 00:00:09.400   <v Alice>before the security audit
+```
+
+Indexed cue-by-cue, a search for `"redesign before the security audit"` matches
+nothing — the phrase exists in the meeting but not in any one cue. Merged, it
+matches. Speakers found in the file are added to `participants` alongside any
+you declared, so attendees who never spoke are not lost.
+
+A parsed import reports what happened:
+
+```json
+"parsed": { "format": "webvtt", "cues": 3, "speakers": ["Alice", "Bob"], "indexed_bytes": 71 }
+```
+
+The absence of that field means the text was stored verbatim. Plain text is
+unchanged, and `private` meetings are never parsed — the body is ciphertext
+this service cannot read.
+
 ### Vault
 
 Storage is free; retrieval is paid. The server only ever sees ciphertext —

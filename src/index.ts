@@ -742,7 +742,7 @@ export function buildRoutes(env: Env): RoutesConfig {
         price: "$0.004",
       },
       description:
-        'Import a meeting transcript. visibility "private" stores ciphertext this service cannot read; "queryable" stores plaintext and indexes it for search. The first import claims the namespace and returns a one-time namespace_token.',
+        'Import a meeting transcript. Accepts a raw WebVTT or SRT export straight from Zoom, Teams, Meet or a notetaker -- timestamps and cue numbering are stripped so search matches phrases the export split across cues. visibility "private" stores ciphertext this service cannot read; "queryable" stores plaintext and indexes it for search. The first import claims the namespace and returns a one-time namespace_token.',
       extensions: declareDiscoveryExtension({
         bodyType: "json",
         input: {
@@ -760,7 +760,7 @@ export function buildRoutes(env: Env): RoutesConfig {
             namespace: { type: "string", description: "Meeting memory isolation scope" },
             title: { type: "string", description: "Human-readable meeting title" },
             occurred_at: { type: "string", description: "ISO-8601 time the meeting happened" },
-            source: { type: "string", description: "Free-form label for where the transcript came from (e.g. webvtt, srt, plain-text)" },
+            source: { type: "string", description: "Optional hint about the export format. Ignored if it disagrees with the file: WebVTT and SRT are detected from the content itself, unpacked into speaker-attributed text, and any speakers found are added to participants. Plain text is stored verbatim." },
             visibility: {
               type: "string",
               description:

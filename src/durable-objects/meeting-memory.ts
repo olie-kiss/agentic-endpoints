@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types";
+import { parseTranscript } from "../lib/transcript";
 import {
   generateToken,
   hashToken,
@@ -257,6 +258,40 @@ export class MeetingMemory extends DurableObject<Env> {
     }
     const title = (body.title ?? "").slice(0, MAX_TITLE_LENGTH);
 
+    /**
+     * Subtitle exports are unpacked here rather than by the caller.
+     *
+     * Zoom, Teams and Meet all emit WebVTT, so requiring pre-parsed plaintext
+     * put a parser between an agent and its first paid call — friction on the
+     * wrong side of the paywall. Only queryable meetings are touched: a
+     * private body is ciphertext this service cannot read, and attempting to
+     * parse it would be both futile and a violation of what that mode
+     * promises.
+     *
+     * Plain text falls through unchanged, so callers that predate importers
+     * are unaffected.
+     */
+    const parsed =
+      visibility === "queryable"
+        ? parseTranscript(content, body.source)
+        : null;
+    const indexed = parsed ? parsed.text : content;
+
+    /**
+     * Speakers found in the file supplement the declared participants; they
+     * do not replace them. The caller may know about attendees who never
+     * spoke, and a transcript cannot.
+     */
+    const declaredParticipants = Array.isArray(body.participants)
+      ? body.participants.filter((p): p is string => typeof p === "string")
+      : [];
+    const participants = parsed
+      ? [
+          ...declaredParticipants,
+          ...parsed.speakers.filter((s) => !declaredParticipants.includes(s)),
+        ]
+      : declaredParticipants;
+
     // Ownership. The token is always minted here and never taken from the
     // request: a caller-chosen token could be low-entropy, or could pre-claim
     // a namespace someone else is about to use, with no recovery path.
@@ -324,7 +359,7 @@ export class MeetingMemory extends DurableObject<Env> {
       body.occurred_at ?? null,
       body.source ?? null,
       visibility,
-      JSON.stringify(body.participants ?? []),
+      JSON.stringify(participants),
       visibility === "private" ? content : null,
       visibility === "private" ? (body.alg ?? "aes-256-gcm") : null,
       bytes,
@@ -336,7 +371,7 @@ export class MeetingMemory extends DurableObject<Env> {
         `INSERT INTO meetings_fts (meeting_id, title, transcript) VALUES (?, ?, ?)`,
         meetingId,
         title,
-        content,
+        indexed,
       );
     }
 
@@ -350,6 +385,23 @@ export class MeetingMemory extends DurableObject<Env> {
       size_bytes: bytes,
       created_at: createdAt,
       searchable: visibility === "queryable",
+      /**
+       * Report the transformation rather than performing it silently. A
+       * caller who sent WebVTT and expected verbatim storage needs to see
+       * that it was unpacked, and `participants` may now contain speakers
+       * they never declared.
+       */
+      ...(parsed && parsed.format !== "plain"
+        ? {
+            parsed: {
+              format: parsed.format,
+              cues: parsed.cues,
+              speakers: parsed.speakers,
+              indexed_bytes: new TextEncoder().encode(indexed).length,
+            },
+          }
+        : {}),
+      participants,
       ...(issuedToken
         ? {
             namespace_token: issuedToken,
