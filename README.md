@@ -165,11 +165,23 @@ indistinguishable from a customer in an access log. The gap that leaves is a
 genuine buyer being refused for a fixable reason and leaving without ever
 appearing as a distinguishable line.
 
-`src/lib/tripwire.ts` emits one structured line per notable request:
+`src/lib/tripwire.ts` emits one structured line per notable request, and the
+same signals are persisted (see below), so the durable answer is:
+
+```bash
+curl -s https://ai.oliverkiss.com/stats | jq .buyer_signals
+```
+
+To watch them arrive live, or to search the raw log lines:
 
 ```bash
 npx wrangler tail --format json | grep BUYER_SIGNAL
 ```
+
+Searching Workers Logs after the fact needs a **full-text needle**, not a
+`$metadata.message` filter: the line is a JSON blob, and the message filter
+does not match inside it — it silently returns zero rather than erroring, which
+reads exactly like "no buyer has ever appeared".
 
 | Signal | Meaning | Confidence |
 |---|---|---|
@@ -193,6 +205,17 @@ The check runs ahead of the credit and x402 gates, both of which answer without
 reaching application code, because a refusal is precisely the event worth
 recording. No header values are logged and the caller IP is dropped in favour
 of the country Cloudflare already derived.
+
+Signals are also persisted in the stats Durable Object and served on `/stats`,
+because a log line is only readable while something is tailing it — a first
+customer arriving overnight would otherwise leave a line nobody read, which
+would then age out. The event ring is bounded by count rather than age: the
+first payment attempt could be the only one for months.
+
+Note that `buyer_signals.payment_attempt` starts at **1** from a deployment
+verification probe on 2026-09-09 (`ua: persistence-verify/1.0`). It could not
+be removed without exposing a mutation endpoint. The first genuine buyer is
+entry two.
 
 ## Published SLOs
 
