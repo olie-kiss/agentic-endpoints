@@ -3,8 +3,11 @@ import {
   parseChallenge,
   diffObservation,
   checkExpectation,
+  checkExpectationAcrossOptions,
   normalizeNetwork,
   type Observation,
+  canonicalizeUrl,
+  registryKeyFor,
 } from "../src/lib/x402-verify";
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -269,14 +272,26 @@ describe("diffObservation", () => {
     expect(drift[0].field).toBe("pay_to");
   });
 
-  it("reports every change at once, so a payee swap is not hidden behind a repricing", () => {
+  /**
+   * A cheaper price must never soften a payee swap. The amount itself is
+   * deliberately NOT reported here: it is the price of a different option
+   * than the one previously seen, so calling it "the price changed" would
+   * describe a comparison that was not made.
+   */
+  it("does not let a simultaneous repricing hide a payee swap", () => {
     const drift = diffObservation(base, {
       ...base,
       pay_to: "0x2222222222222222222222222222222222222222",
       amount: "1",
     });
-    expect(drift.map((d) => d.field).sort()).toEqual(["amount", "pay_to"]);
-    expect(drift.some((d) => d.severity === "critical")).toBe(true);
+    expect(drift.some((d) => d.field === "pay_to" && d.severity === "critical")).toBe(true);
+    expect(drift.some((d) => d.field === "amount")).toBe(false);
+  });
+
+  it("does report a price change when it is the same option being repriced", () => {
+    const drift = diffObservation(base, { ...base, amount: "9000" });
+    expect(drift.map((d) => d.field)).toEqual(["amount"]);
+    expect(drift[0].severity).toBe("warning");
   });
 });
 
@@ -402,6 +417,76 @@ describe("diffObservation across multiple payment options", () => {
     });
     expect(moved.some((d) => d.severity === "critical")).toBe(true);
   });
+
+  /**
+   * Records written before the option set was stored describe only the first
+   * option. Treating the rest as newly added would fire a critical alarm at
+   * every multi-option endpoint on the first look after deploy -- an alarm
+   * manufactured entirely by our own migration.
+   */
+  it("re-baselines a legacy record instead of calling its other options new", () => {
+    const legacy: Observation = { ...base, options: undefined };
+    const drift = diffObservation(legacy, {
+      ...base,
+      options: [opt(PAYEE), opt(ATTACKER, "eip155:1")],
+    });
+    expect(drift.some((d) => d.severity === "critical")).toBe(false);
+    expect(drift.some((d) => d.severity === "info")).toBe(true);
+  });
+
+  it("still raises a critical if a legacy record's own option is gone", () => {
+    const legacy: Observation = { ...base, options: undefined };
+    const drift = diffObservation(legacy, {
+      ...base,
+      pay_to: ATTACKER,
+      options: [opt(ATTACKER), opt(ATTACKER, "eip155:1")],
+    });
+    expect(drift.some((d) => d.field === "pay_to" && d.severity === "critical")).toBe(true);
+  });
+
+  it("compares everything normally on the look after a re-baseline", () => {
+    const rebaselined: Observation = {
+      ...base,
+      options: [opt(PAYEE), opt(PAYEE, "eip155:1")],
+    };
+    const drift = diffObservation(rebaselined, {
+      ...base,
+      options: [opt(PAYEE), opt(PAYEE, "eip155:1"), opt(ATTACKER)],
+    });
+    expect(drift.some((d) => d.field === "pay_to" && d.severity === "critical")).toBe(true);
+  });
+
+  /**
+   * An endpoint may legitimately use a different address per chain. A payee
+   * that is known SOMEWHERE is not thereby known HERE, so an option quietly
+   * routing one chain's token to the other chain's address must not pass
+   * merely because every field has been seen before.
+   */
+  it("catches an option that recombines known values into a new destination", () => {
+    const DAI = "0x50c5725949a6f0c72e6c4a641f24049a917db0cb";
+    const previous: Observation = {
+      ...base,
+      options: [
+        { pay_to: PAYEE, asset: USDC_BASE, network: "base", scheme: "exact" },
+        { pay_to: ATTACKER, asset: DAI, network: "eip155:1", scheme: "exact" },
+      ],
+    };
+    const drift = diffObservation(previous, {
+      ...previous,
+      options: [
+        ...previous.options!,
+        // Every field familiar; this pairing of them is not.
+        { pay_to: ATTACKER, asset: USDC_BASE, network: "base", scheme: "exact" },
+      ],
+    });
+    expect(drift.some((d) => d.field === "pay_to" && d.severity === "critical")).toBe(true);
+  });
+
+  it("does not report a price change that is really just a different option", () => {
+    const a = { ...base, amount: "3000", options: [opt(PAYEE), opt(PAYEE, "eip155:1")] };
+    const b = { ...base, amount: "9000", options: [opt(PAYEE, "eip155:1"), opt(PAYEE)] };
+    expect(diffObservation(a, b).some((d) => d.field === "amount")).toBe(false);
+  });
 });
 
 describe("checkExpectation", () => {
@@ -461,6 +546,41 @@ describe("checkExpectation", () => {
    * Silently passing a ceiling check that could not actually be performed is
    * how an agent ends up approving an 18-decimal charge.
    */
+  /**
+   * `matches_expectation` is the boolean an agent gates on. Returning true
+   * for a challenge whose second option names an attacker -- and which a
+   * client paying on that chain would actually select -- is the single most
+   * dangerous thing this endpoint could say.
+   */
+  it("fails the expectation when a later option breaks it", () => {
+    const attacker = {
+      ...option,
+      pay_to: "0x9999999999999999999999999999999999999999",
+      network: "eip155:1",
+      amount: "50000000",
+      price_usd: "50",
+    };
+    const result = checkExpectationAcrossOptions(
+      { pay_to: PAYEE, max_price_usd: 0.01 },
+      [option, attacker],
+    );
+    expect(result.matches).toBe(false);
+    expect(result.mismatches.join(" ")).toContain("payment option 2");
+  });
+
+  it("passes when every option satisfies the expectation", () => {
+    const sibling = { ...option, network: "eip155:1" };
+    expect(
+      checkExpectationAcrossOptions({ pay_to: PAYEE, max_price_usd: 0.01 }, [option, sibling])
+        .matches,
+    ).toBe(true);
+  });
+
+  it("does not silently pass when there is nothing to check", () => {
+    const result = checkExpectationAcrossOptions({ pay_to: PAYEE }, []);
+    expect(result.matches).toBe(false);
+  });
+
   it("reports, rather than passes, a ceiling it could not check", () => {
     const result = checkExpectation(
       { max_price_usd: 0.01 },
@@ -468,5 +588,42 @@ describe("checkExpectation", () => {
     );
     expect(result.matches).toBe(false);
     expect(result.mismatches[0]).toMatch(/could NOT be checked/);
+  });
+});
+
+/**
+ * The shared registry is the one piece of state a stranger can influence for
+ * everybody, so its key decides whether a hostile caller can defame an
+ * honest endpoint to every later caller.
+ */
+describe("registry keying", () => {
+  it("does not let a GET observation overwrite a POST baseline", () => {
+    const url = "https://victim.example/api";
+    expect(registryKeyFor(url, "GET")).not.toBe(registryKeyFor(url, "POST"));
+  });
+
+  it("normalises the method so casing cannot fork a history", () => {
+    expect(registryKeyFor("https://a.example/x", "post")).toBe(
+      registryKeyFor("https://a.example/x", "POST"),
+    );
+  });
+
+  it("keeps one history for trivially different spellings of one endpoint", () => {
+    const key = (u: string) => registryKeyFor(u, "POST");
+    expect(key("https://X.example/a")).toBe(key("https://x.example/a"));
+    expect(key("https://x.example/a#frag")).toBe(key("https://x.example/a"));
+    expect(key("https://x.example:443/a")).toBe(key("https://x.example/a"));
+  });
+
+  it("still separates genuinely different endpoints on the same host", () => {
+    const key = (u: string) => registryKeyFor(u, "POST");
+    expect(key("https://x.example/a")).not.toBe(key("https://x.example/b"));
+    expect(key("https://x.example/a?v=1")).not.toBe(key("https://x.example/a"));
+  });
+
+  it("drops only the fragment, never the path or query", () => {
+    expect(canonicalizeUrl("https://x.example/a/b?q=1#z")).toBe(
+      "https://x.example/a/b?q=1",
+    );
   });
 });

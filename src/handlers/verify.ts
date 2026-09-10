@@ -2,7 +2,9 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import { errorResponse } from "../lib/utils";
 import {
-  checkExpectation,
+  canonicalizeUrl,
+  registryKeyFor,
+  checkExpectationAcrossOptions,
   parseChallenge,
   type Expectation,
   type Observation,
@@ -43,8 +45,9 @@ app.post("/verify", async (c) => {
   // one. It resolves the hostname over DNS-over-HTTPS and rejects private
   // answers, which a purely lexical check cannot do: a name an attacker
   // controls can point at 127.0.0.1 while looking perfectly public.
+  let safeUrl: URL;
   try {
-    await assertSafeUrl(body.url);
+    safeUrl = await assertSafeUrl(body.url);
   } catch (err) {
     return c.json({
       status: "refused",
@@ -71,7 +74,7 @@ app.post("/verify", async (c) => {
   let fetchError: string | null = null;
 
   try {
-    response = await fetch(body.url, {
+    response = await fetch(safeUrl, {
       method,
       headers: {
         // Identify honestly. An endpoint owner reading their logs should be
@@ -95,12 +98,29 @@ app.post("/verify", async (c) => {
         : "unreachable";
   }
 
-  const registry = c.env.ENDPOINTS.get(c.env.ENDPOINTS.idFromName(body.url));
+  /**
+   * The registry is keyed by method AND canonical URL, not URL alone.
+   *
+   * The method is caller-controlled. Many x402 services price GET and POST
+   * differently (a read tier and a compute tier), so treating a GET
+   * challenge as the next observation of a POST baseline would let anyone
+   * pay $0.003 to make an honest endpoint appear to have swapped its payee
+   * to the next caller -- the exact alarm this endpoint exists to raise.
+   * Alternating the two would flap the baseline indefinitely.
+   *
+   * The URL is canonicalised (host already lowercased by the parser, default
+   * port dropped, fragment removed) so that trivially different spellings of
+   * one endpoint do not fragment its history into separate registries.
+   */
+  const canonicalUrl = canonicalizeUrl(safeUrl);
+  const registry = c.env.ENDPOINTS.get(
+    c.env.ENDPOINTS.idFromName(registryKeyFor(safeUrl, method)),
+  );
 
   if (!response) {
     // Record nothing. See the Durable Object: overwriting a good record
     // because of one timeout would invent a payee-change alarm next time.
-    const { json: seen } = await observe(registry, body.url, null);
+    const { json: seen } = await observe(registry, canonicalUrl, method, null);
     return c.json({
       status: "unreachable",
       url: body.url,
@@ -174,13 +194,15 @@ app.post("/verify", async (c) => {
     })),
   };
 
-  const { json: seen } = await observe(registry, body.url, observation);
+  const { json: seen } = await observe(registry, canonicalUrl, method, observation);
 
   const drift = (seen.drift ?? []) as { severity: string }[];
   const critical = drift.filter((d) => d.severity === "critical");
 
+  // Checked against every option, because a client pays through whichever one
+  // matches a chain and token it holds -- not necessarily the first.
   const expectation = body.expect
-    ? checkExpectation(body.expect, option)
+    ? checkExpectationAcrossOptions(body.expect, challenge.options)
     : null;
 
   return c.json({
@@ -217,7 +239,7 @@ app.post("/verify", async (c) => {
       seen.first_observation === true,
       critical.length,
       expectation,
-      option.price_usd === null,
+      challenge.options.some((o) => o.price_usd === null),
       challenge.options.length,
     ),
   });
@@ -266,13 +288,14 @@ async function readCapped(response: Response): Promise<string | null> {
 async function observe(
   stub: DurableObjectStub,
   url: string,
+  method: string,
   observation: Observation | null,
 ): Promise<{ json: Record<string, unknown> }> {
   const res = await stub.fetch(
     new Request("https://internal/observe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, observation }),
+      body: JSON.stringify({ url, method, observation }),
     }),
   );
   return { json: await res.json<Record<string, unknown>>() };

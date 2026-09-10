@@ -7,6 +7,7 @@ import {
   signReceipt,
   timingSafeEqual,
 } from "../src/lib/utils";
+import pdfSource from "../src/lib/pdf.ts?raw";
 import { extractPdfText } from "../src/lib/pdf";
 
 describe("SSRF guard", () => {
@@ -94,6 +95,32 @@ describe("PDF extraction", () => {
     const result = await extractPdfText(bytes);
     expect(result.pages).toEqual([]);
     expect(result.reason).toBe("unsupported");
+  });
+
+  /**
+   * Regression: the cumulative inflate budget used to be a module-level
+   * `let`, i.e. shared by every request in the isolate. A stranger's large
+   * PDF could exhaust it mid-parse, making a concurrent caller's good
+   * document report "no text layer" — returned as HTTP 200, so x402 settles
+   * and the victim is billed for a confidently wrong answer.
+   *
+   * Exhausting the real 64MB ceiling would need ~128MB live across two
+   * concurrent parses and would OOM the test isolate, so this asserts the
+   * structural invariant instead: no mutable module-level budget may exist.
+   */
+  it("keeps the inflate budget request-scoped, not isolate-global", () => {
+    expect(pdfSource).not.toMatch(/^let\s+inflateBudget/m);
+    expect(pdfSource).toMatch(/interface InflateBudget/);
+  });
+
+  it("parses concurrently without cross-contaminating results", async () => {
+    const docs = Array.from({ length: 8 }, (_, i) =>
+      new TextEncoder().encode(buildMinimalPdf(`Doc ${i}`)),
+    );
+    const results = await Promise.all(docs.map((d) => extractPdfText(d)));
+    results.forEach((r, i) => {
+      expect(r.pages[0]?.text, `doc ${i}`).toContain(`Doc ${i}`);
+    });
   });
 
   it("does not hang on a pathological numeric blob (ReDoS regression)", async () => {

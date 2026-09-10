@@ -274,96 +274,206 @@ export function diffObservation(
 ): Drift[] {
   const drift: Drift[] = [];
   const lc = (v: string | null) => (v ?? "").toLowerCase();
+  const net = (v: string | null) => normalizeNetwork(v) ?? "";
+  /** An option is identified by where it sends money, not by what it costs. */
+  const scopeOf = (o: ObservedOption) => `${net(o.network)}|${lc(o.asset)}`;
 
   const before = optionsOf(previous);
   const after = optionsOf(current);
   const beforeKeys = new Set(before.map(optionKey));
   const afterKeys = new Set(after.map(optionKey));
-
-  // Compared as a set, so merely reordering `accepts` -- which changes nothing
-  // about where money can go -- does not raise a critical alarm.
   const added = after.filter((o) => !beforeKeys.has(optionKey(o)));
   const removed = before.filter((o) => !afterKeys.has(optionKey(o)));
 
-  const knownPayees = new Set(before.map((o) => lc(o.pay_to)));
-  const knownAssets = new Set(before.map((o) => lc(o.asset)));
-  const knownNetworks = new Set(before.map((o) => normalizeNetwork(o.network) ?? ""));
+  /**
+   * A record written before the full option set was stored describes only the
+   * option that happened to be listed first. Every other option the endpoint
+   * has always offered would look newly added, and an endpoint that changed
+   * nothing would be reported as having grown an unknown payee -- a critical
+   * alarm manufactured by our own migration.
+   *
+   * So the first look at such a record re-baselines instead of comparing.
+   */
+  const rebaselining = !previous.options || previous.options.length === 0;
 
-  for (const option of added) {
-    if (!knownPayees.has(lc(option.pay_to))) {
+  if (rebaselining) {
+    const known = before[0];
+    // The single option that WAS recorded is still genuinely comparable. If
+    // it is no longer on offer at all, that is a real change, not a migration
+    // artefact, and is graded normally.
+    if (!afterKeys.has(optionKey(known))) {
+      const nowPayees = new Set(after.map((o) => lc(o.pay_to)));
+      const nowNetworks = new Set(after.map((o) => net(o.network)));
+      const nowAssets = new Set(after.map((o) => lc(o.asset)));
+
+      if (!nowPayees.has(lc(known.pay_to))) {
+        drift.push({
+          field: "pay_to",
+          from: known.pay_to,
+          to: after[0].pay_to,
+          severity: "critical",
+          note:
+            "The receiving address earlier callers paid is no longer offered " +
+            "at all. Money now goes somewhere else entirely. Confirm out of " +
+            "band before paying.",
+        });
+      }
+      if (!nowNetworks.has(net(known.network))) {
+        drift.push({
+          field: "network",
+          from: known.network,
+          to: after[0].network,
+          severity: "critical",
+          note:
+            "The settlement chain earlier callers used is no longer offered. " +
+            "A payment signed for the wrong chain is not recoverable.",
+        });
+      }
+      if (!nowAssets.has(lc(known.asset))) {
+        drift.push({
+          field: "asset",
+          from: known.asset,
+          to: after[0].asset,
+          severity: "critical",
+          note:
+            "The token earlier callers were charged is no longer offered. " +
+            "Verify the new one is something you hold.",
+        });
+      }
+    }
+
+    if (after.length > 1) {
       drift.push({
-        field: "pay_to",
-        from: before.map((o) => o.pay_to).join(", ") || null,
-        to: option.pay_to,
-        severity: "critical",
+        field: "options",
+        from: "1",
+        to: String(after.length),
+        severity: "info",
         note:
-          "A payment option now names a receiving address this endpoint has " +
-          "never offered before. Money paid through it goes somewhere other " +
-          "than where earlier callers sent theirs. Confirm out of band.",
+          `Only one of this endpoint's ${after.length} payment options was on ` +
+          "record before now, so the others are being noted for the first " +
+          "time rather than treated as newly added. They have NOT been " +
+          "checked against history. The next look will cover all of them.",
       });
     }
-    // Normalised, so an endpoint moving from x402 v1's "base" to v2's
-    // "eip155:8453" is correctly read as the same chain.
-    if (!knownNetworks.has(normalizeNetwork(option.network) ?? "")) {
+  } else {
+    const knownNetworks = new Set(before.map((o) => net(o.network)));
+    const knownAssets = new Set(before.map((o) => lc(o.asset)));
+
+    for (const option of added) {
+      let graded = false;
+
+      if (!knownNetworks.has(net(option.network))) {
+        drift.push({
+          field: "network",
+          from: soleValue(before.map((o) => o.network)),
+          to: option.network,
+          severity: "critical",
+          note:
+            "A payment option settles on a chain this endpoint has not used " +
+            "before. A payment signed for the wrong chain is not recoverable.",
+        });
+        graded = true;
+      }
+
+      if (!knownAssets.has(lc(option.asset))) {
+        drift.push({
+          field: "asset",
+          from: soleValue(before.map((o) => o.asset)),
+          to: option.asset,
+          severity: "critical",
+          note:
+            "A payment option charges a token this endpoint has not used " +
+            "before. Verify it is still one you hold.",
+        });
+        graded = true;
+      }
+
+      /**
+       * Scoped to the option's own chain and token, not checked globally.
+       * An endpoint may legitimately use a different address per chain, so a
+       * payee that is known *somewhere* is not thereby known *here* -- and an
+       * option quietly routing one chain's token to another chain's address
+       * would otherwise pass unremarked.
+       */
+      const scope = scopeOf(option);
+      const payeesHere = before.filter((o) => scopeOf(o) === scope).map((o) => lc(o.pay_to));
+      if (!payeesHere.includes(lc(option.pay_to))) {
+        drift.push({
+          field: "pay_to",
+          from: soleValue(
+            before.filter((o) => scopeOf(o) === scope).map((o) => o.pay_to),
+          ),
+          to: option.pay_to,
+          severity: "critical",
+          note:
+            "A payment option now sends money to an address this endpoint " +
+            "has never used for this chain and token. Confirm out of band " +
+            "before paying.",
+        });
+        graded = true;
+      }
+
+      // Every field is individually familiar, but this exact combination is
+      // not. Worth saying, without the weight of a critical.
+      if (!graded) {
+        drift.push({
+          field: "options",
+          from: null,
+          to: option.pay_to,
+          severity: "warning",
+          note:
+            "A payment option appeared that is new as a combination, though " +
+            "its address, chain and token have all been seen here before.",
+        });
+      }
+    }
+
+    if (removed.length > 0 && added.length === 0) {
       drift.push({
-        field: "network",
-        from: before.map((o) => o.network).join(", ") || null,
-        to: option.network,
-        severity: "critical",
+        field: "options",
+        from: String(before.length),
+        to: String(after.length),
+        severity: "info",
         note:
-          "A payment option settles on a chain this endpoint has not used " +
-          "before. A payment signed for the wrong chain is not recoverable.",
+          "The endpoint withdrew a payment option. Nothing new was added, so " +
+          "no new destination for your money appeared.",
       });
     }
-    if (!knownAssets.has(lc(option.asset))) {
+
+    // The set is unchanged but the order is not. Harmless in itself, and
+    // worth saying only because a client that blindly takes the first option
+    // would now pay through a different one.
+    if (
+      added.length === 0 &&
+      removed.length === 0 &&
+      optionKey(before[0]) !== optionKey(after[0])
+    ) {
       drift.push({
-        field: "asset",
-        from: before.map((o) => o.asset).join(", ") || null,
-        to: option.asset,
-        severity: "critical",
+        field: "options",
+        from: before[0].pay_to,
+        to: after[0].pay_to,
+        severity: "warning",
         note:
-          "A payment option charges a token this endpoint has not used " +
-          "before. Verify it is still one you hold.",
+          "The payment options were reordered. The same destinations are on " +
+          "offer, but a client that takes the first one will now use a " +
+          "different option than before.",
       });
     }
   }
 
-  if (removed.length > 0 && added.length === 0) {
-    drift.push({
-      field: "options",
-      from: String(before.length),
-      to: String(after.length),
-      severity: "info",
-      note:
-        "The endpoint withdrew a payment option. Nothing new was added, so " +
-        "no new destination for your money appeared.",
-    });
-  }
-
-  // The set is unchanged but the order is not. Harmless in itself, and worth
-  // saying only because a client that blindly takes the first option would
-  // now pay through a different one.
+  /**
+   * Price is only comparable when it is the price of the same thing. After a
+   * reorder or a substitution the primary option is a different option, and
+   * reporting its different price as "the price changed" would be noise.
+   */
   if (
-    added.length === 0 &&
-    removed.length === 0 &&
-    optionKey(before[0]) !== optionKey(after[0])
+    optionKey(before[0]) === optionKey(after[0]) &&
+    previous.amount !== current.amount
   ) {
-    drift.push({
-      field: "options",
-      from: before[0].pay_to,
-      to: after[0].pay_to,
-      severity: "warning",
-      note:
-        "The payment options were reordered. The same destinations are on " +
-        "offer, but a client that takes the first one will now use a " +
-        "different option than before.",
-    });
-  }
-
-  if (previous.amount !== current.amount) {
-    const before = Number(previous.amount ?? 0);
-    const after = Number(current.amount ?? 0);
-    const rose = Number.isFinite(before) && Number.isFinite(after) && after > before;
+    const wasNum = Number(previous.amount ?? 0);
+    const nowNum = Number(current.amount ?? 0);
+    const rose =
+      Number.isFinite(wasNum) && Number.isFinite(nowNum) && nowNum > wasNum;
     drift.push({
       field: "amount",
       from: previous.amount,
@@ -375,25 +485,21 @@ export function diffObservation(
     });
   }
 
-  if (previous.scheme !== current.scheme) {
-    drift.push({
-      field: "scheme",
-      from: previous.scheme,
-      to: current.scheme,
-      severity: "warning",
-      note: "The payment scheme changed.",
-    });
-  }
-
   return drift;
 }
 
 /**
- * Compares the live challenge against what the caller expected.
+ * The one prior value, or null when there was not exactly one.
  *
- * The caller's expectation usually comes from a directory listing, which is
- * exactly the thing that goes stale. Catching the mismatch is the point.
+ * `from` is documented as a single previous value and an agent may compare it
+ * to an address. Joining several into one string would produce something that
+ * matches nothing; null at least says "not a single value".
  */
+function soleValue(values: (string | null)[]): string | null {
+  const unique = [...new Set(values.map((v) => v ?? ""))].filter((v) => v !== "");
+  return unique.length === 1 ? unique[0] : null;
+}
+
 export interface Expectation {
   price_usd?: string;
   /**
@@ -405,6 +511,39 @@ export interface Expectation {
   pay_to?: string;
   network?: string;
   asset?: string;
+}
+
+/**
+ * Checks the caller's expectation against EVERY option, not just the first.
+ *
+ * `matches_expectation` is the boolean an agent actually gates on. An
+ * endpoint offering an honest option first and an attacker's second would
+ * otherwise be told it matched, while the client -- which selects the option
+ * for a chain and token it holds -- pays through the one that was never
+ * checked. A single failing option fails the whole check.
+ */
+export function checkExpectationAcrossOptions(
+  expected: Expectation,
+  options: PaymentOption[],
+): { matches: boolean; mismatches: string[] } {
+  if (options.length === 0) {
+    return {
+      matches: false,
+      mismatches: ["The endpoint offered no payment options to check"],
+    };
+  }
+
+  const mismatches: string[] = [];
+  options.forEach((option, index) => {
+    const result = checkExpectation(expected, option);
+    for (const mismatch of result.mismatches) {
+      mismatches.push(
+        options.length === 1 ? mismatch : `payment option ${index + 1}: ${mismatch}`,
+      );
+    }
+  });
+
+  return { matches: mismatches.length === 0, mismatches };
 }
 
 export function checkExpectation(
@@ -465,4 +604,29 @@ export function checkExpectation(
   }
 
   return { matches: mismatches.length === 0, mismatches };
+}
+
+/**
+ * The Durable Object name for one endpoint's observation history.
+ *
+ * Keyed by method as well as URL. The method is caller-controlled, and many
+ * x402 services price GET and POST differently, so folding both into one
+ * history would let a caller pay $0.003 to make an honest endpoint look to
+ * everyone else like it had swapped its payee -- the precise alarm this
+ * product exists to raise. Alternating the two would flap that baseline
+ * forever, and would also evict the genuine change history.
+ *
+ * The URL is canonicalised so that trivially different spellings of the same
+ * endpoint share one history instead of fragmenting it: the parser already
+ * lowercases the host and drops a default port, and the fragment is removed
+ * because it is never sent to the server.
+ */
+export function canonicalizeUrl(url: string | URL): string {
+  const canonical = new URL(url.toString());
+  canonical.hash = "";
+  return canonical.toString();
+}
+
+export function registryKeyFor(url: string | URL, method: string): string {
+  return `${method.toUpperCase()} ${canonicalizeUrl(url)}`;
 }

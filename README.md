@@ -652,6 +652,15 @@ presentation, not meaning, and reporting a re-cased address as a changed payee
 would fire the most severe alarm this tool has at an endpoint where nothing
 moved.
 
+History is kept per **method and URL**, not per URL. `method` is caller-supplied,
+and plenty of x402 services price `GET` and `POST` differently — a read tier and
+a compute tier. Sharing one history between them would let anyone spend $0.003
+to make an honest endpoint appear to the *next* caller to have swapped its
+payee, and alternating the two would flap that baseline indefinitely. The URL
+is canonicalised first (host lowercased, default port dropped, fragment
+removed) so that different spellings of one endpoint still share one history
+rather than fragmenting it.
+
 #### What it does not tell you
 
 | Reading | What it actually means |

@@ -585,14 +585,16 @@ export const OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
         "True when there was no prior record, so an empty `drift` means nothing",
       ),
       drift: {
-        type: "array",
+        type: ["array", "null"],
         description:
-          "Differences from the last observation. Any severity 'critical' entry changes where money goes.",
+          "Differences from the last observation. Any severity 'critical' entry changes where money goes. Null means no comparison was made at all, which is not the same as an empty array.",
         items: {
           type: "object",
           properties: {
             field: s("What changed"),
-            severity: s("'critical' or 'warning'"),
+            severity: s(
+              "'critical' when something determining where money goes is new, 'warning' when it is worth knowing, 'info' when it is merely a fact",
+            ),
             from: s("Previous value"),
             to: s("Current value"),
             note: s("Why it matters"),

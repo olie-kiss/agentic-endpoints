@@ -73,7 +73,11 @@ function ipv4ToInt(host: string): number | null {
 
 function isPrivateIpv4(host: string): boolean {
   const ip = ipv4ToInt(host);
-  if (ip === null) return false;
+  // Fail closed, matching isPrivateIpv6. Callers reaching here via the URL
+  // parser always pass a canonical dotted quad, but the DoH answer check
+  // feeds this raw resolver output, where the format is not our invariant.
+  // Treating something we cannot parse as public is the wrong default.
+  if (ip === null) return true;
 
   const inRange = (cidr: string, bits: number) =>
     (ip >>> (32 - bits)) === (ipv4ToInt(cidr)! >>> (32 - bits));
@@ -168,7 +172,10 @@ function isPrivateIpv6(host: string): boolean {
 }
 
 function isBlockedHostLiteral(hostname: string): boolean {
-  const host = hostname.toLowerCase();
+  // The trailing dot of a fully-qualified name is stripped first: "localhost."
+  // and "localhost" resolve identically, so leaving it on would let the
+  // blocklist be sidestepped by a single character.
+  const host = hostname.toLowerCase().replace(/\.+$/, "");
 
   if (host.startsWith("[") && host.endsWith("]")) {
     return isPrivateIpv6(host.slice(1, -1));

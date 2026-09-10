@@ -58,6 +58,15 @@ export class EndpointRegistry extends DurableObject<Env> {
     } catch {
       // Already present.
     }
+    // The HTTP method that elicited the challenge. This object is already
+    // keyed per (method, url) by its caller, so the column is descriptive
+    // rather than load-bearing -- it stops a stored record being ambiguous
+    // about which request produced it.
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE endpoint ADD COLUMN method TEXT`);
+    } catch {
+      // Already present.
+    }
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS changes (
         id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +101,7 @@ export class EndpointRegistry extends DurableObject<Env> {
   private async observe(request: Request): Promise<Response> {
     const body = await request.json<{
       url: string;
+      method?: string;
       observation: Observation | null;
     }>();
 
@@ -158,7 +168,7 @@ export class EndpointRegistry extends DurableObject<Env> {
         `UPDATE endpoint
          SET last_seen = ?, times_seen = times_seen + 1,
              pay_to = ?, amount = ?, asset = ?, network = ?, scheme = ?,
-             options_json = ?
+             options_json = ?, method = ?
          WHERE url = ?`,
         now,
         current.pay_to,
@@ -167,13 +177,14 @@ export class EndpointRegistry extends DurableObject<Env> {
         current.network,
         current.scheme,
         JSON.stringify(current.options ?? []),
+        body.method ?? null,
         body.url,
       );
     } else {
       this.ctx.storage.sql.exec(
         `INSERT INTO endpoint
-           (url, first_seen, last_seen, times_seen, pay_to, amount, asset, network, scheme, options_json)
-         VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+           (url, first_seen, last_seen, times_seen, pay_to, amount, asset, network, scheme, options_json, method)
+         VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
         body.url,
         now,
         now,
@@ -183,6 +194,7 @@ export class EndpointRegistry extends DurableObject<Env> {
         current.network,
         current.scheme,
         JSON.stringify(current.options ?? []),
+        body.method ?? null,
       );
     }
 

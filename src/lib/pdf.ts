@@ -64,11 +64,23 @@ const MAX_CMAP_ENTRIES = 65_536; // per font
 const MAX_CMAP_DEST_CHARS = 64; // per mapped code
 
 /**
- * Cumulative inflate budget for one parse. Without it, a document holding
+ * Cumulative inflate budget for ONE parse. Without it, a document holding
  * hundreds of individually-legal streams still adds up to gigabytes of
  * decompression work.
+ *
+ * This must be request-scoped, never module-level. A Workers isolate serves
+ * many requests concurrently and `inflate` decrements across `await`
+ * boundaries, so a shared counter would let one caller's large document
+ * exhaust the budget of another's — returning a confident "no text layer"
+ * for a perfectly good PDF, on a request the victim has already paid for.
  */
-let inflateBudget = MAX_TOTAL_INFLATED;
+interface InflateBudget {
+  remaining: number;
+}
+
+function newInflateBudget(): InflateBudget {
+  return { remaining: MAX_TOTAL_INFLATED };
+}
 
 /**
  * Inflate a zlib or raw-deflate stream. PDF writers are inconsistent about
@@ -77,7 +89,10 @@ let inflateBudget = MAX_TOTAL_INFLATED;
  * Output is capped: a decompression bomb is a few KB on the wire and
  * hundreds of MB once expanded, which would exhaust the Worker's memory.
  */
-async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
+async function inflate(
+  data: Uint8Array,
+  budget: InflateBudget,
+): Promise<Uint8Array | null> {
   for (const format of ["deflate", "deflate-raw"] as const) {
     try {
       const stream = new Response(data).body;
@@ -95,7 +110,7 @@ async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
         const { done, value } = await reader.read();
         if (done) break;
         total += value.byteLength;
-        if (total > MAX_INFLATED_BYTES || total > inflateBudget) {
+        if (total > MAX_INFLATED_BYTES || total > budget.remaining) {
           truncated = true;
           await reader.cancel();
           break;
@@ -104,7 +119,7 @@ async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
       }
 
       if (truncated) return null;
-      inflateBudget -= total;
+      budget.remaining -= total;
 
       const out = new Uint8Array(total);
       let offset = 0;
@@ -172,11 +187,14 @@ function parseObjects(raw: string): Map<number, PdfObject> {
 }
 
 /** Decode an object's stream according to its /Filter entry. */
-async function decodeStream(obj: PdfObject): Promise<string | null> {
+async function decodeStream(
+  obj: PdfObject,
+  budget: InflateBudget,
+): Promise<string | null> {
   if (!obj.stream) return null;
 
   if (/\/FlateDecode/.test(obj.dict)) {
-    const inflated = await inflate(obj.stream);
+    const inflated = await inflate(obj.stream, budget);
     return inflated ? toLatin1(inflated) : null;
   }
 
@@ -192,11 +210,14 @@ async function decodeStream(obj: PdfObject): Promise<string | null> {
  * compressed /ObjStm streams, where the plain `N G obj` scan cannot see them.
  * Inflate those and register their contents as ordinary objects.
  */
-async function expandObjectStreams(objects: Map<number, PdfObject>) {
+async function expandObjectStreams(
+  objects: Map<number, PdfObject>,
+  budget: InflateBudget,
+) {
   for (const obj of [...objects.values()]) {
     if (!obj.stream || !/\/Type\s*\/ObjStm/.test(obj.dict)) continue;
 
-    const data = await decodeStream(obj);
+    const data = await decodeStream(obj, budget);
     if (!data) continue;
 
     // /N is attacker-controlled. Unclamped, "/N 999999999999" drives the
@@ -337,6 +358,7 @@ async function pageFonts(
   /** Shared across pages: the same font is usually referenced by every page,
    *  and re-inflating and re-parsing its CMap each time is pure waste. */
   cache: Map<number, FontMap>,
+  budget: InflateBudget,
 ): Promise<Map<string, FontMap>> {
   const fonts = new Map<string, FontMap>();
 
@@ -368,7 +390,7 @@ async function pageFonts(
     if (toUnicodeRef) {
       const cmapObj = objects.get(Number(toUnicodeRef[1]));
       if (cmapObj) {
-        const cmap = await decodeStream(cmapObj);
+        const cmap = await decodeStream(cmapObj, budget);
         if (cmap) map = parseToUnicode(cmap);
       }
     }
@@ -580,7 +602,7 @@ function extractTextFromContent(
 export async function extractPdfText(
   bytes: Uint8Array,
 ): Promise<PdfExtraction> {
-  inflateBudget = MAX_TOTAL_INFLATED;
+  const budget = newInflateBudget();
 
   const raw = toLatin1(bytes);
 
@@ -595,7 +617,7 @@ export async function extractPdfText(
   }
 
   const objects = parseObjects(raw);
-  await expandObjectStreams(objects);
+  await expandObjectStreams(objects, budget);
 
   // Page objects, in document order. `/Type /Page` must not match `/Pages`.
   const pageObjects = [...objects.values()].filter((o) =>
@@ -617,12 +639,12 @@ export async function extractPdfText(
         break;
       }
 
-      const fonts = await pageFonts(pageObj.dict, objects, fontCache);
+      const fonts = await pageFonts(pageObj.dict, objects, fontCache, budget);
       const parts: string[] = [];
       for (const ref of contentRefs(pageObj.dict)) {
         const target = objects.get(ref);
         if (!target) continue;
-        const content = await decodeStream(target);
+        const content = await decodeStream(target, budget);
         if (content) parts.push(extractTextFromContent(content, fonts));
       }
       const text = parts.filter(Boolean).join("\n").trim();
@@ -636,7 +658,7 @@ export async function extractPdfText(
     for (const obj of objects.values()) {
       if (!obj.stream) continue;
       if (/\/Type\s*\/(XObject|Metadata|ObjStm|XRef|Font)/.test(obj.dict)) continue;
-      const content = await decodeStream(obj);
+      const content = await decodeStream(obj, budget);
       if (content && /(\bTj\b|\bTJ\b|\bBT\b)/.test(content)) {
         const text = extractTextFromContent(content, new Map());
         totalText += text.length;
