@@ -636,8 +636,21 @@ saw.
 }
 ```
 
-**`pay_to`, `network` and `asset` changes are `critical`** — they determine
-where the money goes. A price change is a `warning` at worst.
+**A `pay_to`, `network` or `asset` that this endpoint has never offered before
+is `critical`** — those determine where the money goes. A price change is a
+`warning` at worst.
+
+The comparison is over the *whole* `accepts` list, not just the first entry.
+A real client pays through the option matching a chain and token it holds,
+which need not be index 0, so an endpoint could otherwise list an honest
+option first and an attacker's payee second and pass a check that only reads
+the first. Reordering the list is reported as a `warning`, not a critical,
+because the same destinations remain on offer.
+
+Addresses are compared case-insensitively. EIP-55 checksumming is
+presentation, not meaning, and reporting a re-cased address as a changed payee
+would fire the most severe alarm this tool has at an endpoint where nothing
+moved.
 
 #### What it does not tell you
 
@@ -645,7 +658,7 @@ where the money goes. A price change is a `warning` at worst.
 | --- | --- |
 | `"status": "ok"` | A challenge was read and recorded. **Not** that the operator will deliver anything. |
 | `"drift": []` with `"first_observation": true` | There is no history to compare against. Absence of drift is not evidence of stability. |
-| `"status": "unreachable"` | Neither evidence of fraud nor of health. Nothing is recorded, so one timeout cannot manufacture a payee-change alarm later. |
+| `"status": "unreachable"` | Neither evidence of fraud nor of health. Nothing is recorded, so one timeout cannot manufacture a payee-change alarm later. `drift` is `null` rather than `[]`, because no comparison was made. |
 | `"price_usd": null` | The token's decimals are unknown here, so the amount was **not** converted. Not a claim that it is small. |
 | `"status": "not_x402"` | No challenge was found. The endpoint may be free, may want a different method, or may not use x402 at all. |
 | `"status": "refused"` | The URL was never fetched — private, loopback and link-local addresses are rejected before any request. |

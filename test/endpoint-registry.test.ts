@@ -98,11 +98,53 @@ describe("endpoint registry", () => {
     expect(recovered.times_seen).toBe(2);
   });
 
+  /**
+   * `drift: []` beside a missing `first_observation` reads as "seen before,
+   * nothing changed" -- a clean bill of health invented out of a timeout.
+   * Null drift says no comparison was made, which is the truth.
+   */
   it("reports no history for an endpoint that was never reachable", async () => {
     const blip = await observe(endpointUrl(), null);
     expect(blip.recorded).toBe(false);
     expect(blip.first_seen).toBeNull();
     expect(blip.times_seen).toBe(0);
+    expect(blip.first_observation).toBe(true);
+    expect(blip.drift).toBeNull();
+  });
+
+  it("does not claim a first observation for an endpoint it already knows", async () => {
+    const url = endpointUrl();
+    await observe(url, observation());
+    const blip = await observe(url, null);
+    expect(blip.first_observation).toBe(false);
+    expect(blip.drift).toBeNull();
+  });
+
+  it("stores every payment option, so a hidden second payee is caught later", async () => {
+    const url = endpointUrl();
+    const opt = (pay_to: string) => ({
+      pay_to,
+      asset: USDC,
+      network: "base",
+      scheme: "exact",
+    });
+    await observe(url, observation({ options: [opt(PAYEE)] }));
+    const after = await observe(
+      url,
+      observation({
+        options: [opt(PAYEE), opt("0x4444444444444444444444444444444444444444")],
+      }),
+    );
+    const drift = after.drift as { field: string; severity: string }[];
+    expect(drift.some((d) => d.field === "pay_to" && d.severity === "critical")).toBe(true);
+  });
+
+  it("does not alarm when a stored payee comes back differently cased", async () => {
+    const url = endpointUrl();
+    const checksummed = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+    await observe(url, observation({ pay_to: checksummed }));
+    const after = await observe(url, observation({ pay_to: checksummed.toLowerCase() }));
+    expect(after.drift).toEqual([]);
   });
 
   /**

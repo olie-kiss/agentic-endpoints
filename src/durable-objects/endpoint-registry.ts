@@ -22,6 +22,17 @@ import { diffObservation, type Drift, type Observation } from "../lib/x402-verif
  */
 const MAX_CHANGES = 50;
 
+/** Stored options, or undefined for records written before they were kept. */
+function parseOptions(raw: unknown) {
+  if (typeof raw !== "string" || raw === "") return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class EndpointRegistry extends DurableObject<Env> {
   private initialized = false;
 
@@ -40,6 +51,13 @@ export class EndpointRegistry extends DurableObject<Env> {
         scheme       TEXT
       );
     `);
+    // Added after the table shipped, so it has to be tolerated as missing.
+    // Records written before this point fall back to their primary fields.
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE endpoint ADD COLUMN options_json TEXT`);
+    } catch {
+      // Already present.
+    }
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS changes (
         id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,8 +105,16 @@ export class EndpointRegistry extends DurableObject<Env> {
         first_seen: (existing?.first_seen as string) ?? null,
         last_seen: (existing?.last_seen as string) ?? null,
         times_seen: Number(existing?.times_seen ?? 0),
-        drift: [],
+        /**
+         * Null rather than an empty array, and `first_observation` always
+         * present. An empty `drift` beside a missing `first_observation`
+         * reads as "seen before, nothing changed" -- a clean bill of health
+         * invented out of a network timeout. Null says no comparison was
+         * made, which is the truth.
+         */
+        drift: null,
         recorded: false,
+        first_observation: !existing,
       });
     }
 
@@ -102,6 +128,7 @@ export class EndpointRegistry extends DurableObject<Env> {
         asset: (existing.asset as string) ?? null,
         network: (existing.network as string) ?? null,
         scheme: (existing.scheme as string) ?? null,
+        options: parseOptions(existing.options_json),
       };
       drift = diffObservation(previous, current);
 
@@ -130,7 +157,8 @@ export class EndpointRegistry extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `UPDATE endpoint
          SET last_seen = ?, times_seen = times_seen + 1,
-             pay_to = ?, amount = ?, asset = ?, network = ?, scheme = ?
+             pay_to = ?, amount = ?, asset = ?, network = ?, scheme = ?,
+             options_json = ?
          WHERE url = ?`,
         now,
         current.pay_to,
@@ -138,13 +166,14 @@ export class EndpointRegistry extends DurableObject<Env> {
         current.asset,
         current.network,
         current.scheme,
+        JSON.stringify(current.options ?? []),
         body.url,
       );
     } else {
       this.ctx.storage.sql.exec(
         `INSERT INTO endpoint
-           (url, first_seen, last_seen, times_seen, pay_to, amount, asset, network, scheme)
-         VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+           (url, first_seen, last_seen, times_seen, pay_to, amount, asset, network, scheme, options_json)
+         VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
         body.url,
         now,
         now,
@@ -153,6 +182,7 @@ export class EndpointRegistry extends DurableObject<Env> {
         current.asset,
         current.network,
         current.scheme,
+        JSON.stringify(current.options ?? []),
       );
     }
 

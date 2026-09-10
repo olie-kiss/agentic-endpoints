@@ -572,7 +572,7 @@ export const OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
           network: s("Chain the payment settles on"),
           scheme: s("x402 payment scheme"),
           price_usd: {
-            type: ["number", "null"],
+            type: ["string", "null"],
             description:
               "Amount in dollars, or null when the token's decimals are unknown here. Null means unconverted, not free.",
           },

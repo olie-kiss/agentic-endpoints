@@ -46,8 +46,13 @@ const CHAIN_ALIASES: Record<string, string> = {
   "avalanche-fuji": "eip155:43113",
   arbitrum: "eip155:42161",
   optimism: "eip155:10",
-  "solana-devnet": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
-  solana: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+  // Held lowercase deliberately. base58 IS case-significant, so these are a
+  // canonical comparison form only -- never render one back to a caller as a
+  // chain id. Left mixed-case, a v1 endpoint saying "solana" would never
+  // compare equal to a v2 one saying the literal id, which is the exact
+  // false alarm this table exists to prevent.
+  "solana-devnet": "solana:etwtrabzayq6imfeykouru166vu2xqa1",
+  solana: "solana:5eykt4usfv8p8njdtrepy1vzqkqzkvdp",
 };
 
 /**
@@ -94,7 +99,12 @@ export function checkUrl(raw: string): UrlCheck {
     return { ok: false, reason: `Unsupported scheme "${url.protocol}"` };
   }
 
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  // The trailing dot of a fully-qualified name is stripped: "localhost." and
+  // "localhost" resolve identically, so leaving it on would let one past.
+  const host = url.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "");
 
   if (
     host === "localhost" ||
@@ -106,9 +116,15 @@ export function checkUrl(raw: string): UrlCheck {
   }
 
   // IPv4 literals in private, loopback, link-local or carrier-grade NAT space.
-  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const [a, b] = [Number(v4[1]), Number(v4[2])];
+  //
+  // The address is decoded first, because a dotted-quad regex alone is the
+  // classic SSRF filter bypass: 127.0.0.1 can equally be written 2130706433,
+  // 0x7f000001, 0177.0.0.1 or 127.1, and every one of those is a valid host
+  // that browsers and fetch() resolve to loopback.
+  const v4 = parseIpv4(host);
+  if (v4 !== null) {
+    const a = (v4 >>> 24) & 0xff;
+    const b = (v4 >>> 16) & 0xff;
     const isPrivate =
       a === 10 ||
       a === 127 ||
@@ -116,9 +132,36 @@ export function checkUrl(raw: string): UrlCheck {
       (a === 192 && b === 168) ||
       (a === 169 && b === 254) || // link-local, incl. cloud metadata
       (a === 100 && b >= 64 && b <= 127) ||
-      a === 0;
+      a === 0 ||
+      a >= 224; // multicast and reserved
     if (isPrivate) {
       return { ok: false, reason: "Private and link-local addresses are refused" };
+    }
+  }
+
+  // IPv4-mapped and IPv4-compatible IPv6, e.g. ::ffff:127.0.0.1, which would
+  // otherwise slip past both the IPv4 and the IPv6 checks.
+  //
+  // Both spellings have to be handled: the URL parser rewrites the dotted
+  // form into hextets, so "[::ffff:127.0.0.1]" arrives here as "::ffff:7f00:1".
+  const mappedDotted = host.match(/^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i);
+  const mappedHex = host.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+
+  let embedded: number | null = null;
+  if (mappedDotted) embedded = parseIpv4(mappedDotted[1]);
+  else if (mappedHex) {
+    embedded = ((parseInt(mappedHex[1], 16) << 16) | parseInt(mappedHex[2], 16)) >>> 0;
+  }
+
+  if (embedded !== null) {
+    const a = (embedded >>> 24) & 0xff;
+    const b = (embedded >>> 16) & 0xff;
+    const dotted = `${a}.${b}.${(embedded >>> 8) & 0xff}.${embedded & 0xff}`;
+    if (!checkUrl(`http://${dotted}`).ok) {
+      return {
+        ok: false,
+        reason: "Private and link-local addresses are refused (IPv4-mapped IPv6)",
+      };
     }
   }
 
@@ -127,11 +170,49 @@ export function checkUrl(raw: string): UrlCheck {
     return { ok: false, reason: "Private IPv6 addresses are refused" };
   }
 
-  if (url.hostname.endsWith(".internal") || url.hostname.endsWith(".local")) {
+  if (host.endsWith(".internal") || host.endsWith(".local")) {
     return { ok: false, reason: "Internal hostnames are refused" };
   }
 
   return { ok: true };
+}
+
+/**
+ * Decodes every IPv4 form a URL host may legally take, or returns null.
+ *
+ * Accepts dotted-quad, shorthand (`127.1`), and octal, hex or plain decimal
+ * parts. Returns the address as a 32-bit number so it can be classified once
+ * rather than pattern-matched in each of its written forms.
+ */
+function parseIpv4(host: string): number | null {
+  const parts = host.split(".");
+  if (parts.length === 0 || parts.length > 4) return null;
+
+  const values: number[] = [];
+  for (const part of parts) {
+    if (part === "") return null;
+    let value: number;
+    if (/^0[xX][0-9a-fA-F]+$/.test(part)) value = parseInt(part.slice(2), 16);
+    else if (/^0[0-7]+$/.test(part)) value = parseInt(part.slice(1), 8);
+    else if (/^\d+$/.test(part)) value = parseInt(part, 10);
+    else return null; // a letter anywhere means this is a name, not an address
+    if (!Number.isFinite(value) || value < 0) return null;
+    values.push(value);
+  }
+
+  // The final part absorbs the remaining octets: "127.1" is 127.0.0.1, and a
+  // lone "2130706433" is the whole address.
+  const last = values[values.length - 1];
+  const leading = values.slice(0, -1);
+  if (leading.some((v) => v > 0xff)) return null;
+  const remaining = 4 - leading.length;
+  if (last >= 2 ** (8 * remaining)) return null;
+
+  let result = last;
+  for (let i = 0; i < leading.length; i++) {
+    result += leading[i] * 2 ** (8 * (3 - i));
+  }
+  return result >>> 0;
 }
 
 export interface PaymentOption {
@@ -226,7 +307,13 @@ export function parseChallenge(
 
 function decodeHeader(value: string): Omit<ParsedChallenge, "source"> | null {
   try {
-    const cleaned = value.trim().replace(/\s+/g, "");
+    // Base64url is accepted too: an endpoint that emits "-" and "_" would
+    // otherwise throw in atob and be silently reported as not using x402.
+    const cleaned = value
+      .trim()
+      .replace(/\s+/g, "")
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
     const json = JSON.parse(atob(cleaned)) as Record<string, unknown>;
     return fromObject(json);
   } catch {
@@ -264,6 +351,44 @@ export interface Observation {
   asset: string | null;
   network: string | null;
   scheme: string | null;
+  /**
+   * Every payment option the endpoint offered, not just the one a reader
+   * happens to look at first.
+   *
+   * A real client picks the option matching a chain and token it can actually
+   * pay in, which need not be the first. An endpoint that lists an honest
+   * option first and an attacker's payee second would otherwise pass this
+   * check while taking the money through the option the client selects.
+   */
+  options?: ObservedOption[];
+}
+
+/** The parts of an option that decide where money goes. Price is not one. */
+export interface ObservedOption {
+  pay_to: string | null;
+  asset: string | null;
+  network: string | null;
+  scheme: string | null;
+}
+
+/**
+ * Reduces an option to a comparable identity.
+ *
+ * Addresses are lowercased because EIP-55 checksumming is presentation, not
+ * meaning: the same address in two casings is the same address, and reporting
+ * a re-casing as a changed payee would fire the most severe alarm this tool
+ * has at an endpoint where nothing moved. `amount` is excluded so a price
+ * change is never mistaken for a new payment option.
+ */
+function optionKey(o: ObservedOption): string {
+  const lc = (v: string | null) => (v ?? "").toLowerCase();
+  return [lc(o.pay_to), normalizeNetwork(o.network) ?? "", lc(o.asset), lc(o.scheme)].join("|");
+}
+
+/** Falls back to the primary fields for records written before options were stored. */
+function optionsOf(o: Observation): ObservedOption[] {
+  if (o.options && o.options.length > 0) return o.options;
+  return [{ pay_to: o.pay_to, asset: o.asset, network: o.network, scheme: o.scheme }];
 }
 
 export interface Drift {
@@ -287,40 +412,90 @@ export function diffObservation(
   current: Observation,
 ): Drift[] {
   const drift: Drift[] = [];
+  const lc = (v: string | null) => (v ?? "").toLowerCase();
 
-  if (previous.pay_to !== current.pay_to) {
+  const before = optionsOf(previous);
+  const after = optionsOf(current);
+  const beforeKeys = new Set(before.map(optionKey));
+  const afterKeys = new Set(after.map(optionKey));
+
+  // Compared as a set, so merely reordering `accepts` -- which changes nothing
+  // about where money can go -- does not raise a critical alarm.
+  const added = after.filter((o) => !beforeKeys.has(optionKey(o)));
+  const removed = before.filter((o) => !afterKeys.has(optionKey(o)));
+
+  const knownPayees = new Set(before.map((o) => lc(o.pay_to)));
+  const knownAssets = new Set(before.map((o) => lc(o.asset)));
+  const knownNetworks = new Set(before.map((o) => normalizeNetwork(o.network) ?? ""));
+
+  for (const option of added) {
+    if (!knownPayees.has(lc(option.pay_to))) {
+      drift.push({
+        field: "pay_to",
+        from: before.map((o) => o.pay_to).join(", ") || null,
+        to: option.pay_to,
+        severity: "critical",
+        note:
+          "A payment option now names a receiving address this endpoint has " +
+          "never offered before. Money paid through it goes somewhere other " +
+          "than where earlier callers sent theirs. Confirm out of band.",
+      });
+    }
+    // Normalised, so an endpoint moving from x402 v1's "base" to v2's
+    // "eip155:8453" is correctly read as the same chain.
+    if (!knownNetworks.has(normalizeNetwork(option.network) ?? "")) {
+      drift.push({
+        field: "network",
+        from: before.map((o) => o.network).join(", ") || null,
+        to: option.network,
+        severity: "critical",
+        note:
+          "A payment option settles on a chain this endpoint has not used " +
+          "before. A payment signed for the wrong chain is not recoverable.",
+      });
+    }
+    if (!knownAssets.has(lc(option.asset))) {
+      drift.push({
+        field: "asset",
+        from: before.map((o) => o.asset).join(", ") || null,
+        to: option.asset,
+        severity: "critical",
+        note:
+          "A payment option charges a token this endpoint has not used " +
+          "before. Verify it is still one you hold.",
+      });
+    }
+  }
+
+  if (removed.length > 0 && added.length === 0) {
     drift.push({
-      field: "pay_to",
-      from: previous.pay_to,
-      to: current.pay_to,
-      severity: "critical",
+      field: "options",
+      from: String(before.length),
+      to: String(after.length),
+      severity: "info",
       note:
-        "The receiving address changed. Payments now go somewhere other than " +
-        "where earlier callers sent them. Confirm out of band before paying.",
+        "The endpoint withdrew a payment option. Nothing new was added, so " +
+        "no new destination for your money appeared.",
     });
   }
 
-  // Compared after normalising, so an endpoint moving from x402 v1's "base"
-  // to v2's "eip155:8453" is correctly seen as the same chain.
-  if (normalizeNetwork(previous.network) !== normalizeNetwork(current.network)) {
+  // The set is unchanged but the order is not. Harmless in itself, and worth
+  // saying only because a client that blindly takes the first option would
+  // now pay through a different one.
+  if (
+    added.length === 0 &&
+    removed.length === 0 &&
+    optionKey(before[0]) !== optionKey(after[0])
+  ) {
     drift.push({
-      field: "network",
-      from: previous.network,
-      to: current.network,
-      severity: "critical",
+      field: "options",
+      from: before[0].pay_to,
+      to: after[0].pay_to,
+      severity: "warning",
       note:
-        "The settlement chain changed. A payment signed for the wrong chain " +
-        "is not recoverable.",
-    });
-  }
-
-  if (previous.asset !== current.asset) {
-    drift.push({
-      field: "asset",
-      from: previous.asset,
-      to: current.asset,
-      severity: "critical",
-      note: "The token being charged changed. Verify it is still the one you hold.",
+        "The payment options were reordered. The same destinations are on " +
+        "offer, but a client that takes the first one will now use a " +
+        "different option than before.",
     });
   }
 

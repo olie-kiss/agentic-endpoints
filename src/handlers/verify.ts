@@ -118,13 +118,7 @@ app.post("/verify", async (c) => {
     response.headers.get("payment-required") ??
     response.headers.get("x-payment-required");
 
-  let text: string | null = null;
-  try {
-    const raw = await response.arrayBuffer();
-    text = new TextDecoder().decode(raw.slice(0, MAX_BODY_BYTES));
-  } catch {
-    text = null;
-  }
+  const text = await readCapped(response);
 
   const challenge = parseChallenge(headerValue, text);
 
@@ -150,6 +144,15 @@ app.post("/verify", async (c) => {
     asset: option.asset,
     network: option.network,
     scheme: option.scheme,
+    // Every option, not just the first. A client pays through the option
+    // matching a chain and token it holds, which need not be index 0, so an
+    // endpoint could otherwise hide a second payee behind an honest first one.
+    options: challenge.options.map((o) => ({
+      pay_to: o.pay_to,
+      asset: o.asset,
+      network: o.network,
+      scheme: o.scheme,
+    })),
   };
 
   const { json: seen } = await observe(registry, body.url, observation);
@@ -173,6 +176,12 @@ app.post("/verify", async (c) => {
      * guessed price is worse than none.
      */
     charges: option,
+    /**
+     * Every option on offer. `charges` is only the first; a client that can
+     * pay on a different chain would select a different one, so the whole
+     * list is given rather than left for the caller to discover.
+     */
+    all_charges: challenge.options,
     payment_options: challenge.options.length,
     resource_url: challenge.resource_url,
     description: challenge.description,
@@ -190,9 +199,50 @@ app.post("/verify", async (c) => {
       critical.length,
       expectation,
       option.price_usd === null,
+      challenge.options.length,
     ),
   });
 });
+
+/**
+ * Reads at most MAX_BODY_BYTES from a stranger's response, then hangs up.
+ *
+ * Buffering the whole body first would let a caller-supplied URL return half
+ * a gigabyte and exhaust the isolate -- which every other request sharing
+ * that isolate would pay for. The cap has to be applied while reading, not
+ * after.
+ */
+async function readCapped(response: Response): Promise<string | null> {
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < MAX_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        total += value.byteLength;
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    // Stop the transfer rather than politely draining a body we do not want.
+    await reader.cancel().catch(() => {});
+  }
+
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  // Non-fatal by default, so a multi-byte character split by the cap becomes
+  // a replacement character instead of throwing away the whole challenge.
+  return new TextDecoder().decode(joined.slice(0, MAX_BODY_BYTES));
+}
 
 async function observe(
   stub: DurableObjectStub,
@@ -221,6 +271,7 @@ function buildAdvice(
   criticalCount: number,
   expectation: { matches: boolean; mismatches: string[] } | null,
   unknownUnits: boolean,
+  optionCount: number,
 ): string {
   const parts: string[] = [];
 
@@ -252,6 +303,14 @@ function buildAdvice(
     parts.push(
       "The asset is not one whose decimals are known here, so the amount has " +
         "NOT been converted to dollars. Do not assume it is small.",
+    );
+  }
+
+  if (optionCount > 1) {
+    parts.push(
+      `This endpoint offers ${optionCount} payment options and \`charges\` shows ` +
+        "only the first. Check `all_charges` for the one you would actually " +
+        "pay through, because it need not be the first.",
     );
   }
 
