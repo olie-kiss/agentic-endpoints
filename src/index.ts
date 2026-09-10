@@ -831,6 +831,54 @@ export function buildRoutes(env: Env): RoutesConfig {
         },
       }),
     },
+    "/meetings/summarize": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.030",
+      },
+      description:
+        "Ask a question in plain language and get an answer grounded in your own meetings, with a citation to the meeting each claim came from. Retrieves the relevant transcripts and reasons over them. When nothing matches, no answer is generated rather than one being invented.",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          namespace: "my-meetings-4f9c2b1e8d7a",
+          namespace_token: "the token returned by your first import",
+          question: "what did we decide about pricing?",
+          limit: 5,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            namespace: { type: "string", description: "Meeting memory isolation scope" },
+            namespace_token: { type: "string", description: "One-time token issued when the namespace was claimed" },
+            question: { type: "string", description: "A plain-language question. Not FTS5 syntax -- the search terms are derived from it and returned as `terms`." },
+            limit: { type: "number", description: "Max meetings to consult, 1-8 (default 5)" },
+          },
+          required: ["namespace", "namespace_token", "question"],
+        },
+        output: {
+          example: {
+            status: "ok",
+            question: "what did we decide about pricing?",
+            answer:
+              "You agreed to defer the pricing change until Q3 [6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11].",
+            consulted: [
+              {
+                meeting_id: "6f1c3b90-0f6a-4c2e-9a1e-2b7d5c8e4a11",
+                title: "Pricing review",
+                chars_used: 4820,
+                truncated: false,
+              },
+            ],
+            terms: ["decide", "pricing"],
+            searched_meetings: 12,
+            private_meetings_skipped: 3,
+          },
+        },
+      }),
+    },
     "/meetings/get": {
       accepts: {
         scheme: "exact",

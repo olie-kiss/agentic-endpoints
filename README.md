@@ -16,6 +16,7 @@ Live at **https://ai.oliverkiss.com**
 | `/compress` | POST | $0.005 | Token compression / context reduction for LLMs |
 | `/meetings/import` | POST | $0.004 | Import a meeting transcript, private or searchable |
 | `/meetings/search` | POST | $0.006 | Full-text search across your meetings |
+| `/meetings/summarize` | POST | $0.030 | Answer a question from your meetings, with citations |
 | `/meetings/get` | POST | $0.002 | Read one meeting in full |
 | `/meetings/list` | POST | $0.001 | List meetings (metadata only) |
 | `/meetings/delete` | POST | $0.001 | Delete a meeting and its index entry |
@@ -120,7 +121,7 @@ CDP Bazaar is skipped for exactly that reason.
 | x402-list.com | Submitted, pending review | `POST /api/v1/submit`; free because the service is on a custom domain |
 | Official MCP Registry | **Published — `com.oliverkiss/agentic-endpoints`, status active** | `./scripts/publish-registry.sh`. Ownership proven by an apex TXT record and an ed25519-signed timestamp, so no financial account is involved |
 | npm | **Published — [`agentic-endpoints`](https://www.npmjs.com/package/agentic-endpoints)** | `cd sdk && npm publish`. Counts as discovery, not just convenience: npm is crawled by every AI coding assistant, so the client is findable by the same models that would use the service |
-| Smithery | **Published — [`kiss-olie/agentic-endpoints`](https://smithery.ai/servers/kiss-olie/agentic-endpoints)**, quality **98/100** | `npx -y @smithery/cli@latest mcp publish "https://ai.oliverkiss.com/mcp" -n kiss-olie/agentic-endpoints` — **no auth needed**, and it updates in place. The scan finds all 16 tools. Note the namespace is `kiss-olie`, not the GitHub handle. Their registry API and the markdown view served to non-browser clients are both **badly stale** (still report 12 tools and the old favicon); only the browser-rendered page is current, so verify there |
+| Smithery | **Published — [`kiss-olie/agentic-endpoints`](https://smithery.ai/servers/kiss-olie/agentic-endpoints)**, quality **98/100** | `npx -y @smithery/cli@latest mcp publish "https://ai.oliverkiss.com/mcp" -n kiss-olie/agentic-endpoints` — **no auth needed**, and it updates in place. The scan finds all 17 tools (re-publish after adding one, or it keeps reporting the old count). Note the namespace is `kiss-olie`, not the GitHub handle. Their registry API and the markdown view served to non-browser clients are both **badly stale** (still report 12 tools and the old favicon); only the browser-rendered page is current, so verify there |
 | Glama | Not listed; **claim file pre-placed** | `glama.json` at the repo root (`maintainers: ["olie-kiss"]`, schema `glama.ai/mcp/schemas/server.json`) claims the listing automatically if their GitHub crawler indexes us. The separate `/.well-known/glama.json` is a *different* schema (`connector.json`, an opaque `glama_claim_` token) for remote connectors and needs a listing to exist first |
 
 Aggregators such as PulseMCP ingest from the official registry, so publishing
@@ -502,6 +503,60 @@ happened.
 
 Via MCP the same thing is `meetings_search`, `meetings_import`, `meetings_get`
 and `meetings_list`.
+
+### Asking a question instead of reading excerpts
+
+`/meetings/search` hands back ranked excerpts and leaves the reasoning to you.
+`/meetings/summarize` takes a plain-language question, retrieves the relevant
+transcripts, and answers from them with a citation per claim:
+
+```bash
+curl -X POST https://ai.oliverkiss.com/meetings/summarize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "namespace": "my-meetings-4f9c2b1e8d7a",
+    "namespace_token": "<from the first import>",
+    "question": "what did we decide about pricing?"
+  }'
+```
+
+```json
+{
+  "status": "ok",
+  "answer": "You agreed to defer the pricing change until Q3 [6f1c3b90-…].",
+  "consulted": [
+    { "meeting_id": "6f1c3b90-…", "title": "Pricing review", "chars_used": 4820, "truncated": false }
+  ],
+  "terms": ["decide", "pricing"],
+  "searched_meetings": 12,
+  "private_meetings_skipped": 3
+}
+```
+
+The question is not FTS5 syntax — the terms are derived from it and returned
+as `terms`, so a bad answer can be traced to bad retrieval rather than
+guessed at. `consulted` is what the answer was actually built from; a
+`truncated` entry means only part of that transcript was read, so its silence
+on a point is not evidence.
+
+**The negative cases matter more than the positive one.** A summarizer's
+dangerous failure is not a wrong answer but a confident one assembled from
+nothing, because the caller cannot tell the difference afterwards. So:
+
+| Situation | What happens |
+|---|---|
+| No meeting matched | `no_matches`, **the model is never called** |
+| Every meeting is private | `no_matches` with `searched_meetings: 0` and an explicit warning not to read it as "never discussed" |
+| Question was all stopwords | `unusable_question`, no answer |
+| Model unreachable | `503` with `answer: null` — plus the meetings it already found, so you can read them with `meetings_get` rather than paying again |
+
+Private meetings can never contribute to an answer; `private_meetings_skipped`
+says how many were excluded. Answers are generated by
+`@cf/meta/llama-4-scout-17b-16e-instruct` on Workers AI, pinned rather than
+floating — a silently swapped model would change every answer this endpoint
+has ever given.
+
+Via MCP this is `meetings_summarize`.
 
 ### Importing a raw export
 

@@ -42,6 +42,13 @@ head_sampling_rate = 1
 [vars]
 ENVIRONMENT = "development"
 
+# ── Workers AI ─────────────────────────────────────────────────────
+# Used only by /meetings/summarize, which answers a question over
+# transcripts the caller already owns. Bindings are NOT inherited by named
+# environments, so this is repeated under [env.testnet.ai] below.
+[ai]
+binding = "AI"
+
 # ── Revenue Monitoring ─────────────────────────────────────────────
 # Watermark and rolling payment history for the on-chain USDC watcher.
 [[kv_namespaces]]
@@ -167,6 +174,12 @@ FACILITATOR_URL = "https://facilitator.payai.network"
 [env.testnet.observability]
 enabled = true
 head_sampling_rate = 1
+
+# Bindings are not inherited by named environments; without this the testnet
+# Worker has no env.AI and /meetings/summarize would report the model as
+# unavailable there.
+[env.testnet.ai]
+binding = "AI"
 
 [[env.testnet.kv_namespaces]]
 binding = "MONITOR"

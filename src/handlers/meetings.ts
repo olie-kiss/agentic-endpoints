@@ -76,6 +76,40 @@ app.post("/search", async (c) => {
   return c.json({ ...json, namespace: body.namespace });
 });
 
+/**
+ * POST /meetings/summarize — $0.030
+ *
+ * Answers a plain-language question from the caller's own transcripts, with a
+ * citation per claim. Priced well above search because it runs inference over
+ * retrieved transcripts; the amount of text that can reach the model is
+ * bounded inside the Durable Object so the margin cannot be inverted by one
+ * very large meeting.
+ *
+ * The interesting cases are the negative ones: no match, no searchable
+ * meeting, or no model. All three return without an answer rather than with
+ * a fluent one, because a fabricated answer here is indistinguishable from a
+ * correct one and would be acted on.
+ */
+app.post("/summarize", async (c) => {
+  const body = await c.req.json<{
+    namespace?: string;
+    namespace_token?: string;
+    question?: string;
+    limit?: number;
+  }>();
+
+  if (!body.namespace) return errorResponse("namespace is required", 400);
+  if (!body.question) return errorResponse("question is required", 400);
+
+  const { res, json } = await callDo(c.env, body.namespace, "/summarize", {
+    namespace_token: body.namespace_token,
+    question: body.question,
+    limit: body.limit,
+  });
+  if (!res.ok) return c.json(json, res.status as ContentfulStatusCode);
+  return c.json({ ...json, namespace: body.namespace });
+});
+
 /** POST /meetings/get — $0.002. Returns one meeting in full. */
 app.post("/get", async (c) => {
   const body = await c.req.json<{

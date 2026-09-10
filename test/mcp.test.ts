@@ -134,7 +134,7 @@ describe("MCP tools", () => {
     expect(status).toBe(200);
     expect(json.result.resultType).toBe("complete");
     expect(json.result.cacheScope).toBe("public");
-    expect(json.result.tools.length).toBe(16);
+    expect(json.result.tools.length).toBe(17);
   });
 
   /**

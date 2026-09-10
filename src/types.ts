@@ -14,6 +14,12 @@ export interface Env {
   WRITE_RATE_LIMITER: RateLimit;
   PAID_RATE_LIMITER: RateLimit;
 
+  // Workers AI, used only by /meetings/summarize to answer over transcripts
+  // the caller already owns. Optional in the type because the testnet and
+  // test environments can run without it; the endpoint reports its absence
+  // rather than pretending it produced an answer.
+  AI?: Ai;
+
   // Secrets (set via `wrangler secret put`)
   X402_PAY_TO: string;
   RECEIPT_SECRET: string;

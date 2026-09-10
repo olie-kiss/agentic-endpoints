@@ -146,10 +146,35 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "meetings_summarize",
+    title: "Answer a question from your meetings",
+    description:
+      "Ask a plain-language question and get a written answer grounded in the user's own meeting transcripts, with the meeting id cited after each claim. Prefer this over meetings_search when the user wants an ANSWER ('what did we decide about pricing?', 'who owned the migration?') rather than a list of excerpts to read themselves. Pass the question as the user asked it -- this is NOT FTS5 syntax, and the terms actually searched come back as `terms` so you can check the retrieval. IMPORTANT: a 'no_matches' status means no answer was generated, and 'searched_meetings': 0 means every meeting is private and NOTHING was read -- neither is evidence the topic was never discussed, and you must not report it as such. Meetings imported as private are encrypted and can never contribute to an answer; `private_meetings_skipped` says how many were left out. A 'truncated' meeting in `consulted` had only part of its transcript read, so its silence on a point is not evidence either.",
+    path: "/meetings/summarize",
+    price: "$0.030",
+    annotations: READS,
+    inputSchema: {
+      type: "object",
+      properties: {
+        namespace: str("Isolation scope holding your meetings"),
+        namespace_token: NAMESPACE_TOKEN,
+        question: str(
+          "The question in plain language, as the user asked it. Not a search expression.",
+        ),
+        limit: {
+          type: "integer",
+          description: "Max meetings to consult, 1-8 (default 5)",
+        },
+      },
+      required: ["namespace", "namespace_token", "question"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "meetings_import",
     title: "Import a meeting transcript",
     description:
-      "Store a transcript so it can be searched later. `visibility` is a required decision and cannot be guessed for you: 'queryable' stores plaintext, indexes it, and means this service can read it; 'private' stores ciphertext you encrypted yourself, which is unreadable here and therefore NEVER searchable. Send `transcript` for queryable and `ciphertext` for private -- the mismatched combinations are refused rather than silently doing the wrong thing. The first import into a namespace returns a namespace_token shown exactly once; save it or the namespace is unrecoverable.",
+      "Store a transcript so it can be searched later. Accepts a raw WebVTT or SRT export straight from Zoom, Teams, Meet or a notetaker -- you do NOT need to strip timestamps or parse it first, and cues split across timing boundaries are merged so phrases still match. `visibility` is a required decision and cannot be guessed for you: 'queryable' stores plaintext, indexes it, and means this service can read it; 'private' stores ciphertext you encrypted yourself, which is unreadable here and therefore NEVER searchable. Send `transcript` for queryable and `ciphertext` for private -- the mismatched combinations are refused rather than silently doing the wrong thing. The first import into a namespace returns a namespace_token shown exactly once; save it or the namespace is unrecoverable.",
     path: "/meetings/import",
     price: "$0.004",
     annotations: WRITES_APPENDS,
@@ -160,7 +185,7 @@ const TOOLS: ToolDef[] = [
         namespace_token: NAMESPACE_TOKEN,
         title: str("Human-readable meeting title"),
         occurred_at: str("ISO-8601 time the meeting happened"),
-        source: str("Free-form label for where the transcript came from, e.g. webvtt, srt, plain-text"),
+        source: str("Optional hint about the export format. Ignored if it disagrees with the file: WebVTT and SRT are detected from the content itself, unpacked into speaker-attributed text, and any speakers found are added to participants. Plain text is stored verbatim."),
         visibility: str(
           "'queryable' (plaintext, searchable, readable by this service) or 'private' (ciphertext, never searchable). Defaults to private.",
         ),
@@ -489,6 +514,50 @@ const n = (description: string) => ({ type: "number", description });
 const b = (description: string) => ({ type: "boolean", description });
 
 export const OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
+  meetings_summarize: {
+    type: "object",
+    properties: {
+      status: s(
+        "'ok' when an answer was generated. 'no_matches', 'unusable_question' and 'content_missing' all mean NO answer was produced and must not be read as the topic being absent.",
+      ),
+      question: s("The question as asked"),
+      answer: {
+        type: ["string", "null"],
+        description:
+          "The grounded answer with [meeting_id] citations, or null when nothing was summarised.",
+      },
+      consulted: {
+        type: "array",
+        description: "The meetings the answer was actually built from",
+        items: {
+          type: "object",
+          properties: {
+            meeting_id: s("Pass to meetings_get to read the full transcript"),
+            title: s("Meeting title"),
+            occurred_at: s("ISO-8601 time the meeting happened, if known"),
+            chars_used: n("Characters of this transcript given to the model"),
+            truncated: b(
+              "True when only part of the transcript was read, so its silence on a point is not evidence",
+            ),
+          },
+          required: ["meeting_id", "chars_used", "truncated"],
+        },
+      },
+      terms: {
+        type: "array",
+        items: { type: "string" },
+        description: "The search terms derived from the question",
+      },
+      model: s("The model that produced the answer"),
+      searched_meetings: n(
+        "Queryable meetings available to search. 0 means nothing was read.",
+      ),
+      private_meetings_skipped: n(
+        "Encrypted meetings that could not contribute to the answer",
+      ),
+    },
+    required: ["status"],
+  },
   meetings_search: {
     type: "object",
     properties: {

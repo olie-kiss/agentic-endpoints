@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types";
 import { parseTranscript } from "../lib/transcript";
+import { questionToFtsQuery } from "../lib/question";
 import {
   generateToken,
   hashToken,
@@ -51,6 +52,28 @@ const MAX_TITLE_LENGTH = 512;
 const MAX_MEETINGS_PER_NAMESPACE = 2000;
 const MAX_NAMESPACE_BYTES = 100 * 1024 * 1024; // 100 MiB per namespace
 const MAX_SEARCH_RESULTS = 50;
+
+/**
+ * Summarization bounds.
+ *
+ * The endpoint is a fixed price, so the amount of transcript a single call can
+ * push through the model has to be bounded or one caller with a 1 MiB meeting
+ * turns a $0.03 sale into a loss. The character budget is the real cost
+ * control; the meeting cap keeps any one answer traceable to a readable
+ * number of sources.
+ */
+const MAX_SUMMARY_MEETINGS = 8;
+const DEFAULT_SUMMARY_MEETINGS = 5;
+/** ~40k characters ≈ 10k tokens, comfortably inside the model's window. */
+const MAX_SUMMARY_CHARS = 40_000;
+/** The model's default max_tokens is 256, which truncates mid-sentence. */
+const SUMMARY_MAX_TOKENS = 800;
+/**
+ * Chosen for its 131k-token context, so the bound above is ours and not the
+ * model's. Pinned rather than floating: a silently swapped model changes
+ * every answer this endpoint has ever given.
+ */
+const SUMMARY_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
 
 type Visibility = "private" | "queryable";
 
@@ -166,6 +189,8 @@ export class MeetingMemory extends DurableObject<Env> {
         return this.handleImport(request);
       case "/search":
         return this.handleSearch(request);
+      case "/summarize":
+        return this.handleSummarize(request);
       case "/get":
         return this.handleGet(request);
       case "/list":
@@ -511,6 +536,279 @@ export class MeetingMemory extends DurableObject<Env> {
               "No meetings in this namespace are searchable. They were all " +
               'imported as "private", which this service cannot read. ' +
               'Re-import with visibility "queryable" to search them.',
+          }
+        : {}),
+    });
+  }
+
+  /**
+   * Answers a question over the caller's own meetings.
+   *
+   * The value here is not the model, it is the grounding. An agent that asks
+   * "what did we decide about pricing" and gets a fluent answer assembled
+   * from nothing is worse than useless, because the answer is indistinguishable
+   * from a correct one. So this method is built to make the failure modes
+   * visible rather than smooth:
+   *
+   *   - no matching meetings  -> the model is never called at all
+   *   - no searchable meetings -> says so, rather than "not discussed"
+   *   - model unavailable      -> 503, never a fabricated answer
+   *   - transcripts truncated  -> reported per meeting
+   *
+   * Every one of those would otherwise surface as a confident sentence.
+   */
+  private async handleSummarize(request: Request): Promise<Response> {
+    const body = await request.json<{
+      namespace_token?: string;
+      question?: string;
+      limit?: number;
+    }>();
+
+    if (!(await this.isOwner(body.namespace_token))) return this.forbidden();
+
+    const question = (body.question ?? "").trim();
+    if (!question) {
+      return Response.json({ error: "question is required" }, { status: 400 });
+    }
+
+    const limit = Math.min(
+      Math.max(Number(body.limit) || DEFAULT_SUMMARY_MEETINGS, 1),
+      MAX_SUMMARY_MEETINGS,
+    );
+
+    const totals = this.ctx.storage.sql
+      .exec(
+        `SELECT
+           COUNT(*) AS total,
+           COALESCE(SUM(visibility = 'queryable'), 0) AS searchable
+         FROM meetings`,
+      )
+      .toArray()[0];
+    const searchable = Number(totals?.searchable ?? 0);
+    const total = Number(totals?.total ?? 0);
+    const privateSkipped = total - searchable;
+
+    const parsedQuestion = questionToFtsQuery(question);
+    if (!parsedQuestion.match) {
+      return Response.json({
+        status: "unusable_question",
+        question,
+        detail:
+          "No searchable terms could be taken from that question, so nothing " +
+          "was searched and no answer was generated. This is NOT a finding " +
+          "that the topic was never discussed. Ask using words that would " +
+          "appear in the transcript.",
+      });
+    }
+
+    let rows: Record<string, unknown>[] = [];
+    try {
+      rows = this.ctx.storage.sql
+        .exec(
+          `SELECT meeting_id, rank FROM meetings_fts
+           WHERE meetings_fts MATCH ?
+           ORDER BY rank LIMIT ?`,
+          parsedQuestion.match,
+          limit,
+        )
+        .toArray() as Record<string, unknown>[];
+    } catch (err) {
+      // The question is machine-generated from user text, so a syntax error
+      // here is our bug, not the caller's. Reporting it as "no matches"
+      // would hide it forever.
+      return Response.json(
+        {
+          status: "error",
+          detail:
+            "Could not search this namespace. The question was converted to " +
+            "a query this index rejected, which is a fault on our side.",
+          error: err instanceof Error ? err.message : String(err),
+          terms: parsedQuestion.terms,
+        },
+        { status: 500 },
+      );
+    }
+
+    if (rows.length === 0) {
+      // Deliberately no model call. Handing a summarizer zero context and
+      // asking it to answer is precisely how a confident fabrication is
+      // produced.
+      return Response.json({
+        status: "no_matches",
+        question,
+        terms: parsedQuestion.terms,
+        answer: null,
+        consulted: [],
+        searched_meetings: searchable,
+        private_meetings_skipped: privateSkipped,
+        notice:
+          searchable === 0 && total > 0
+            ? "No meetings in this namespace are searchable. They were all " +
+              'imported as "private", which this service cannot read, so ' +
+              "NOTHING was searched. Do not report this as the topic never " +
+              'having been discussed. Re-import with visibility "queryable".'
+            : "No meeting matched those terms, so no answer was generated. " +
+              "Nothing was summarised rather than something being invented.",
+      });
+    }
+
+    // Gather transcripts under a fixed character budget. Ranked order first,
+    // so if the budget runs out it is the least relevant meeting that loses
+    // text. Short meetings hand their unused share to later ones.
+    const share = Math.floor(MAX_SUMMARY_CHARS / rows.length);
+    let carry = 0;
+    const consulted: {
+      meeting_id: string;
+      title: string;
+      occurred_at: string | null;
+      chars_used: number;
+      truncated: boolean;
+    }[] = [];
+    const sections: string[] = [];
+
+    for (const row of rows) {
+      const meetingId = String(row.meeting_id);
+      const text = this.transcriptOf(meetingId);
+      if (text === null) continue; // broken record; excluded, not faked
+
+      const meta = this.ctx.storage.sql
+        .exec(
+          `SELECT title, occurred_at FROM meetings WHERE id = ?`,
+          meetingId,
+        )
+        .toArray()[0];
+
+      const allowance = share + carry;
+      const used = Math.min(text.length, allowance);
+      carry = allowance - used;
+
+      const excerpt = text.slice(0, used);
+      const title = String(meta?.title ?? "");
+      const occurredAt = (meta?.occurred_at as string) ?? null;
+
+      consulted.push({
+        meeting_id: meetingId,
+        title,
+        occurred_at: occurredAt,
+        chars_used: used,
+        truncated: used < text.length,
+      });
+
+      sections.push(
+        `--- MEETING ${meetingId}\n` +
+          `Title: ${title || "(untitled)"}\n` +
+          (occurredAt ? `Date: ${occurredAt}\n` : "") +
+          (used < text.length ? `(transcript truncated)\n` : "") +
+          `\n${excerpt}`,
+      );
+    }
+
+    if (sections.length === 0) {
+      return Response.json({
+        status: "content_missing",
+        question,
+        terms: parsedQuestion.terms,
+        answer: null,
+        detail:
+          "The matching meetings have no readable stored text, so no answer " +
+          "was generated. These are broken records, not empty meetings.",
+      });
+    }
+
+    if (!this.env.AI) {
+      // An honest 503 beats an answer produced some other way. The caller
+      // paid for a grounded summary; anything else is a different product.
+      return Response.json(
+        {
+          status: "unavailable",
+          detail:
+            "Summarisation is not available in this deployment. Your " +
+            "meetings are unaffected and meetings_search still works.",
+          consulted,
+          terms: parsedQuestion.terms,
+          answer: null,
+        },
+        { status: 503, headers: { "Retry-After": "60" } },
+      );
+    }
+
+    const system =
+      "You answer questions about meetings using ONLY the transcripts " +
+      "provided. Rules, in order of importance:\n" +
+      "1. Never use outside knowledge or assumptions. If the transcripts do " +
+      "not answer the question, say plainly that they do not.\n" +
+      "2. Cite the meeting id in square brackets after each claim, like " +
+      "[6f1c3b90-...]. Every factual sentence needs a citation.\n" +
+      "3. If the transcripts disagree, say so and cite both rather than " +
+      "picking one.\n" +
+      "4. A transcript marked truncated may omit later discussion; do not " +
+      "treat its silence as evidence.\n" +
+      "5. Be concise and specific. Quote short phrases where the exact " +
+      "wording matters.";
+
+    const user =
+      `Question: ${question}\n\n` +
+      `Transcripts:\n\n${sections.join("\n\n")}`;
+
+    let answer: string;
+    try {
+      const result = (await this.env.AI.run(SUMMARY_MODEL, {
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        max_tokens: SUMMARY_MAX_TOKENS,
+        // Low but not zero: this is extraction, not composition.
+        temperature: 0.2,
+      })) as { response?: string };
+
+      answer = (result?.response ?? "").trim();
+      if (!answer) throw new Error("model returned an empty response");
+    } catch (err) {
+      console.error("Summarisation failed:", err);
+      return Response.json(
+        {
+          status: "unavailable",
+          detail:
+            "The summarisation model could not be reached or returned " +
+            "nothing. No answer was generated. Retry shortly; your meetings " +
+            "are unaffected and meetings_search still works.",
+          error: err instanceof Error ? err.message : String(err),
+          // Retrieval already succeeded, so hand back what was found. The
+          // caller can read these with meetings_get instead of paying again
+          // to rediscover them, and it makes clear the failure was the model
+          // rather than an empty namespace.
+          consulted,
+          terms: parsedQuestion.terms,
+          answer: null,
+        },
+        { status: 503, headers: { "Retry-After": "30" } },
+      );
+    }
+
+    return Response.json({
+      status: "ok",
+      question,
+      answer,
+      // What the answer was actually built from. Without this the caller
+      // cannot tell a well-grounded answer from a thin one.
+      consulted,
+      terms: parsedQuestion.terms,
+      model: SUMMARY_MODEL,
+      searched_meetings: searchable,
+      private_meetings_skipped: privateSkipped,
+      ...(parsedQuestion.fellBack
+        ? {
+            retrieval_notice:
+              "That question contained only common words, so retrieval was " +
+              "weak and the meetings consulted may not be the relevant ones.",
+          }
+        : {}),
+      ...(privateSkipped > 0
+        ? {
+            privacy_notice:
+              `${privateSkipped} private meeting(s) were not read and could ` +
+              "not contribute to this answer.",
           }
         : {}),
     });
