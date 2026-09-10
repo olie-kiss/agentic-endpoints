@@ -1,0 +1,266 @@
+import { Hono } from "hono";
+import type { Env } from "../types";
+import { errorResponse } from "../lib/utils";
+import {
+  checkExpectation,
+  checkUrl,
+  parseChallenge,
+  type Expectation,
+  type Observation,
+} from "../lib/x402-verify";
+
+const app = new Hono<{ Bindings: Env }>();
+
+/** A challenge is small. Anything larger is not one, and reading it is a cost. */
+const MAX_BODY_BYTES = 64 * 1024;
+/** A payment challenge is served before any work, so it should be immediate. */
+const FETCH_TIMEOUT_MS = 8000;
+
+/**
+ * POST /x402/verify — $0.003
+ *
+ * Pre-flight a stranger's paid endpoint before authorising money to it.
+ *
+ * The failure this exists for is specific: an agent paying automatically
+ * cannot notice that an endpoint's receiving address changed. Every request
+ * still returns 200, the price still looks right, and the funds go somewhere
+ * new. By the time a human looks, it has happened a thousand times.
+ *
+ * So this fetches the endpoint's live challenge, and compares it against
+ * every previous observation made by every other caller. The comparison is
+ * what a single agent cannot do for itself.
+ */
+app.post("/verify", async (c) => {
+  const body = await c.req.json<{
+    url?: string;
+    expect?: Expectation;
+    method?: string;
+  }>().catch(() => ({}) as { url?: string; expect?: Expectation; method?: string });
+
+  if (!body.url) return errorResponse("url is required", 400);
+
+  const safety = checkUrl(body.url);
+  if (!safety.ok) {
+    return c.json({
+      status: "refused",
+      url: body.url,
+      detail: safety.reason,
+      advice:
+        "This URL was not fetched. Only public HTTP(S) endpoints can be " +
+        "verified.",
+    });
+  }
+
+  // An x402 endpoint answers on the method it advertises. POST is the common
+  // case; the caller can override. The body is deliberately empty -- we want
+  // the payment challenge, not to perform the work.
+  const method = (body.method ?? "POST").toUpperCase();
+  if (!["GET", "POST", "HEAD"].includes(method)) {
+    return errorResponse("method must be GET, POST or HEAD", 400);
+  }
+
+  let response: Response | null = null;
+  let fetchError: string | null = null;
+
+  try {
+    response = await fetch(body.url, {
+      method,
+      headers: {
+        // Identify honestly. An endpoint owner reading their logs should be
+        // able to tell this apart from a buyer and from a scanner.
+        "User-Agent": "agentic-endpoints-x402-verify/1.0 (+https://ai.oliverkiss.com)",
+        Accept: "application/json",
+        ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(method === "POST" ? { body: "{}" } : {}),
+      redirect: "manual",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (err) {
+    fetchError = err instanceof Error ? err.message : String(err);
+  }
+
+  const registry = c.env.ENDPOINTS.get(c.env.ENDPOINTS.idFromName(body.url));
+
+  if (!response) {
+    // Record nothing. See the Durable Object: overwriting a good record
+    // because of one timeout would invent a payee-change alarm next time.
+    const { json: seen } = await observe(registry, body.url, null);
+    return c.json({
+      status: "unreachable",
+      url: body.url,
+      reachable: false,
+      error: fetchError,
+      ...seen,
+      advice:
+        "The endpoint could not be reached, which is NOT evidence that it is " +
+        "fraudulent, and equally not evidence that it works. Do not pay on " +
+        "the strength of this result either way.",
+    });
+  }
+
+  // Redirects are reported, not followed: the endpoint that answers a
+  // redirect is a different endpoint from the one the caller named, and
+  // silently verifying the wrong one is the failure mode to avoid.
+  if (response.status >= 300 && response.status < 400) {
+    return c.json({
+      status: "redirected",
+      url: body.url,
+      http_status: response.status,
+      location: response.headers.get("location"),
+      advice:
+        "This URL redirects and was not followed. Verify the destination URL " +
+        "directly, because that is where a payment would actually go.",
+    });
+  }
+
+  const headerValue =
+    response.headers.get("payment-required") ??
+    response.headers.get("x-payment-required");
+
+  let text: string | null = null;
+  try {
+    const raw = await response.arrayBuffer();
+    text = new TextDecoder().decode(raw.slice(0, MAX_BODY_BYTES));
+  } catch {
+    text = null;
+  }
+
+  const challenge = parseChallenge(headerValue, text);
+
+  if (!challenge || challenge.options.length === 0) {
+    return c.json({
+      status: "not_x402",
+      url: body.url,
+      reachable: true,
+      http_status: response.status,
+      advice:
+        response.status === 402
+          ? "The endpoint returned 402 but no readable x402 challenge, so " +
+            "there is nothing to pay against. Treat it as broken, not as free."
+          : "No x402 payment challenge was found. This endpoint may be free, " +
+            "may require a different method, or may not use x402 at all.",
+    });
+  }
+
+  const option = challenge.options[0];
+  const observation: Observation = {
+    pay_to: option.pay_to,
+    amount: option.amount,
+    asset: option.asset,
+    network: option.network,
+    scheme: option.scheme,
+  };
+
+  const { json: seen } = await observe(registry, body.url, observation);
+
+  const drift = (seen.drift ?? []) as { severity: string }[];
+  const critical = drift.filter((d) => d.severity === "critical");
+
+  const expectation = body.expect
+    ? checkExpectation(body.expect, option)
+    : null;
+
+  return c.json({
+    status: "ok",
+    url: body.url,
+    reachable: true,
+    http_status: response.status,
+    /**
+     * What the endpoint declares right now. `price_usd` is only populated for
+     * assets whose decimals are known for certain; otherwise the raw amount
+     * is given and the caller is told the units are unknown, because a
+     * guessed price is worse than none.
+     */
+    charges: option,
+    payment_options: challenge.options.length,
+    resource_url: challenge.resource_url,
+    description: challenge.description,
+    x402_version: challenge.x402_version,
+    challenge_source: challenge.source,
+    ...seen,
+    ...(expectation
+      ? {
+          matches_expectation: expectation.matches,
+          mismatches: expectation.mismatches,
+        }
+      : {}),
+    advice: buildAdvice(
+      seen.first_observation === true,
+      critical.length,
+      expectation,
+      option.price_usd === null,
+    ),
+  });
+});
+
+async function observe(
+  stub: DurableObjectStub,
+  url: string,
+  observation: Observation | null,
+): Promise<{ json: Record<string, unknown> }> {
+  const res = await stub.fetch(
+    new Request("https://internal/observe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, observation }),
+    }),
+  );
+  return { json: await res.json<Record<string, unknown>>() };
+}
+
+/**
+ * Says what was and was not established. Never says "safe".
+ *
+ * This endpoint can only report what an endpoint declares about itself. It
+ * cannot tell whether the operator will deliver, and an agent that reads
+ * "verified" as "trustworthy" would be worse off than one that never called.
+ */
+function buildAdvice(
+  firstObservation: boolean,
+  criticalCount: number,
+  expectation: { matches: boolean; mismatches: string[] } | null,
+  unknownUnits: boolean,
+): string {
+  const parts: string[] = [];
+
+  if (criticalCount > 0) {
+    parts.push(
+      "STOP AND CHECK: something that determines where your money goes has " +
+        "changed since this endpoint was last seen. See `drift`. This is the " +
+        "pattern of a compromised or replaced service, though it is also what " +
+        "a legitimate migration looks like -- confirm out of band before paying.",
+    );
+  }
+
+  if (expectation && !expectation.matches) {
+    parts.push(
+      "The endpoint does not match what you expected. Whatever told you those " +
+        "values is stale or wrong; trust this challenge over a directory listing.",
+    );
+  }
+
+  if (firstObservation) {
+    parts.push(
+      "This is the first time this endpoint has been observed here, so there " +
+        "is no history to compare against. Absence of drift is NOT evidence of " +
+        "stability.",
+    );
+  }
+
+  if (unknownUnits) {
+    parts.push(
+      "The asset is not one whose decimals are known here, so the amount has " +
+        "NOT been converted to dollars. Do not assume it is small.",
+    );
+  }
+
+  parts.push(
+    "This reports only what the endpoint declares about itself. It is not a " +
+      "judgement that the operator will deliver anything.",
+  );
+
+  return parts.join(" ");
+}
+
+export default app;

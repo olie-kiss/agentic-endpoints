@@ -14,6 +14,7 @@ Live at **https://ai.oliverkiss.com**
 | `/scrape` | POST | $0.005 | Web scraping and text extraction |
 | `/pdf-parse` | POST | $0.01 | PDF text extraction from a URL |
 | `/compress` | POST | $0.005 | Token compression / context reduction for LLMs |
+| `/x402/verify` | POST | $0.003 | Check a stranger's x402 endpoint before paying it |
 | `/meetings/import` | POST | $0.004 | Import a meeting transcript, private or searchable |
 | `/meetings/search` | POST | $0.006 | Full-text search across your meetings |
 | `/meetings/summarize` | POST | $0.030 | Answer a question from your meetings, with citations |
@@ -589,6 +590,73 @@ The absence of that field means the text was stored verbatim. Plain text is
 unchanged, and `private` meetings are never parsed — the body is ciphertext
 this service cannot read.
 
+### Checking an endpoint before paying it
+
+An agent that pays automatically cannot notice that the money started going
+somewhere else. Every response still returns 200, the price still looks right,
+and by the time a human looks it has happened a thousand times.
+
+```bash
+curl -X POST https://ai.oliverkiss.com/x402/verify \
+  -H "X-PAYMENT: <signed payload>" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "url": "https://example.com/api/thing",
+        "expect": { "pay_to": "0xabc...", "max_price_usd": 0.01 }
+      }'
+```
+
+It fetches the endpoint's live payment challenge and compares it against every
+observation made by every previous caller. That comparison is the part an agent
+cannot do for itself — it can remember what *it* saw, not what everyone else
+saw.
+
+```json
+{
+  "status": "ok",
+  "charges": {
+    "pay_to": "0xabc...",
+    "amount": "10000",
+    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "network": "eip155:8453",
+    "price_usd": "0.01"
+  },
+  "first_seen": "2025-01-01T00:00:00.000Z",
+  "times_seen": 14,
+  "first_observation": false,
+  "drift": [
+    {
+      "field": "pay_to",
+      "severity": "critical",
+      "from": "0xabc...",
+      "to": "0xdef...",
+      "note": "The receiving address changed. Payments now go somewhere other than where earlier callers sent them."
+    }
+  ]
+}
+```
+
+**`pay_to`, `network` and `asset` changes are `critical`** — they determine
+where the money goes. A price change is a `warning` at worst.
+
+#### What it does not tell you
+
+| Reading | What it actually means |
+| --- | --- |
+| `"status": "ok"` | A challenge was read and recorded. **Not** that the operator will deliver anything. |
+| `"drift": []` with `"first_observation": true` | There is no history to compare against. Absence of drift is not evidence of stability. |
+| `"status": "unreachable"` | Neither evidence of fraud nor of health. Nothing is recorded, so one timeout cannot manufacture a payee-change alarm later. |
+| `"price_usd": null` | The token's decimals are unknown here, so the amount was **not** converted. Not a claim that it is small. |
+| `"status": "not_x402"` | No challenge was found. The endpoint may be free, may want a different method, or may not use x402 at all. |
+| `"status": "refused"` | The URL was never fetched — private, loopback and link-local addresses are rejected before any request. |
+
+Network identifiers are normalised before comparison, so an endpoint moving
+from x402 v1's `"base"` to v2's `"eip155:8453"` is correctly read as the same
+chain rather than as a critical chain change.
+
+The word "safe" never appears in a response, deliberately. This reports what an
+endpoint declares about itself; it cannot certify an operator.
+
 ### Vault
 
 Storage is free; retrieval is paid. The server only ever sees ciphertext —
@@ -748,6 +816,17 @@ services such as Mercury and Sphere Pay are not an option.
   `/verify` does nothing, which is why the catalogue held 0 of 28,095 of our
   routes. On testnet all 9 appeared within seconds. Announcing the mainnet
   catalogue costs $0.068, not the ~$1 assumed for months.
+- **`/x402/verify` has no observation history yet.** Every endpoint it is
+  pointed at will come back `"first_observation": true` until someone checks
+  the same URL twice, and drift detection is worth nothing until then. The
+  comparison logic is covered by tests, and the parser has been run against
+  this service's own live challenges — which is how the CAIP-2 mismatch was
+  caught: x402 v2 declares `eip155:8453` where v1 said `base`, and comparing
+  those literally would have fired a critical "the settlement chain changed"
+  alarm at any endpoint that merely upgraded protocol version. Network
+  identifiers are now normalised before comparison. What remains untested is
+  the handler against a *third-party* endpoint, since every x402 service
+  reachable for free is one of ours.
 - **`/meetings/summarize` has never run behind a real payment.** The parts
   have been verified separately rather than end to end: the model, the
   grounding prompt and its negative controls were exercised against Workers AI

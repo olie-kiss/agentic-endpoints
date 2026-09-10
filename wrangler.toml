@@ -112,9 +112,19 @@ new_sqlite_classes = ["Credits"]
 tag = "v4"
 new_sqlite_classes = ["Stats"]
 
+# Shared observation history for x402 endpoints, one instance per endpoint
+# URL so every caller verifying the same endpoint reads the same record.
+[[durable_objects.bindings]]
+name = "ENDPOINTS"
+class_name = "EndpointRegistry"
+
 [[migrations]]
 tag = "v5"
 new_sqlite_classes = ["MeetingMemory"]
+
+[[migrations]]
+tag = "v6"
+new_sqlite_classes = ["EndpointRegistry"]
 
 # ── Rate Limiting ──────────────────────────────────────────────────
 # Per-Cloudflare-location limits. Free endpoints are the abuse surface,
@@ -220,9 +230,17 @@ class_name = "MeetingMemory"
 tag = "v1"
 new_sqlite_classes = ["OnceKey", "Vault", "Credits", "Stats"]
 
+[[env.testnet.durable_objects.bindings]]
+name = "ENDPOINTS"
+class_name = "EndpointRegistry"
+
 [[env.testnet.migrations]]
 tag = "v2"
 new_sqlite_classes = ["MeetingMemory"]
+
+[[env.testnet.migrations]]
+tag = "v3"
+new_sqlite_classes = ["EndpointRegistry"]
 
 [[env.testnet.ratelimits]]
 name = "FREE_RATE_LIMITER"

@@ -40,6 +40,7 @@ import {
 } from "./lib/revenue";
 import vaultHandler from "./handlers/vault";
 import meetingsHandler from "./handlers/meetings";
+import verifyHandler from "./handlers/verify";
 import { landingPage } from "./pages/landing";
 
 // Re-export the Durable Object classes so wrangler can find them
@@ -48,6 +49,7 @@ export { Vault } from "./durable-objects/vault";
 export { MeetingMemory } from "./durable-objects/meeting-memory";
 export { Credits } from "./durable-objects/credits";
 export { Stats } from "./durable-objects/stats";
+export { EndpointRegistry } from "./durable-objects/endpoint-registry";
 
 const app = new Hono<{ Bindings: Env; Variables: { dispatch: Dispatcher } }>();
 
@@ -231,6 +233,7 @@ app.route("/pdf-parse", pdfParserHandler);
 app.route("/compress", tokenCompressorHandler);
 app.route("/vault", vaultHandler);
 app.route("/meetings", meetingsHandler);
+app.route("/x402", verifyHandler);
 app.route("/credits", creditsHandler);
 
 /**
@@ -827,6 +830,71 @@ export function buildRoutes(env: Env): RoutesConfig {
             ],
             searched_meetings: 12,
             private_meetings_skipped: 3,
+          },
+        },
+      }),
+    },
+    "/x402/verify": {
+      accepts: {
+        scheme: "exact",
+        network: BASE,
+        payTo: env.X402_PAY_TO,
+        price: "$0.003",
+      },
+      description:
+        "Before paying a stranger's x402 endpoint, read its live payment challenge and compare it against every previous observation. Flags a changed receiving address, network or asset as critical drift. Reports what the endpoint declares; it does not certify the operator.",
+      extensions: declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          url: "https://example.com/api/thing",
+          expect: { pay_to: "0x...", max_price_usd: 0.01 },
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: {
+              type: "string",
+              description:
+                "Public HTTP(S) URL of the paid endpoint. Private and loopback addresses are refused, not fetched.",
+            },
+            method: {
+              type: "string",
+              description: "Method used to provoke the challenge: POST (default), GET or HEAD",
+            },
+            expect: {
+              type: "object",
+              description:
+                "Optional. What you believe to be true, typically from a directory listing. Mismatches are reported so you can trust the live challenge over the listing.",
+              properties: {
+                pay_to: { type: "string", description: "Address you expect to pay" },
+                network: { type: "string", description: "Chain you expect. A name like 'base' and its CAIP-2 form 'eip155:8453' are treated as the same chain." },
+                asset: { type: "string", description: "Token contract address" },
+                max_price_usd: { type: "number", description: "Refuse-above threshold in USD" },
+              },
+            },
+          },
+          required: ["url"],
+        },
+        output: {
+          example: {
+            status: "ok",
+            url: "https://example.com/api/thing",
+            reachable: true,
+            charges: {
+              pay_to: "0x0000000000000000000000000000000000000000",
+              amount: "10000",
+              asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              network: "eip155:8453",
+              scheme: "exact",
+              price_usd: "0.01",
+            },
+            first_seen: "2025-01-01T00:00:00.000Z",
+            last_seen: "2025-01-08T00:00:00.000Z",
+            times_seen: 14,
+            first_observation: false,
+            drift: [],
+            advice:
+              "This reports only what the endpoint declares about itself. It is not a judgement that the operator will deliver anything.",
           },
         },
       }),

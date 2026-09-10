@@ -146,6 +146,45 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "x402_verify",
+    title: "Check an x402 endpoint before paying it",
+    description:
+      "Call this BEFORE authorising payment to any x402 endpoint you did not write yourself. It fetches the endpoint's live payment challenge and compares it against every observation previously made by every other caller, so you learn things a single agent cannot see on its own -- above all, whether the address receiving the money has changed. A 'critical' entry in `drift` means something determining where funds go (pay_to, network or asset) is different from before: stop and confirm out of band. Read the LIVE `charges` in preference to any directory listing, and pass what the listing claimed as `expect` to have the disagreement reported. IMPORTANT: 'status':'ok' is NOT an endorsement -- it only means a challenge was read and recorded. It cannot tell you whether the operator will deliver anything for your money. 'first_observation':true means there is no history at all, so an empty `drift` proves nothing. 'status':'unreachable' is not evidence of fraud and not evidence of health; do not pay on it either way. A null `price_usd` means the token's units are unknown here and the amount was NOT converted -- do not assume it is small.",
+    path: "/x402/verify",
+    price: "$0.003",
+    annotations: READS,
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: str(
+          "Public HTTPS URL of the endpoint you are about to pay. Loopback and private-network addresses are refused rather than fetched.",
+        ),
+        method: str(
+          "How to provoke the challenge: 'POST' (default), 'GET' or 'HEAD'. Use the method you intend to pay for.",
+        ),
+        expect: {
+          type: "object",
+          description:
+            "Optional. What a directory, README or earlier response led you to believe. Any disagreement with the live challenge is reported.",
+          properties: {
+            pay_to: str("The address you expected to pay"),
+            network: str(
+              "The chain you expected. A name like 'base' and its CAIP-2 form 'eip155:8453' are understood as the same chain, so an endpoint upgrading protocol version is not reported as a mismatch.",
+            ),
+            asset: str("The token contract address you expected"),
+            max_price_usd: {
+              type: "number",
+              description: "Report a mismatch if the live price exceeds this",
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "meetings_summarize",
     title: "Answer a question from your meetings",
     description:
@@ -514,6 +553,63 @@ const n = (description: string) => ({ type: "number", description });
 const b = (description: string) => ({ type: "boolean", description });
 
 export const OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
+  x402_verify: {
+    type: "object",
+    properties: {
+      status: s(
+        "'ok' means a challenge was read -- NOT that the endpoint is trustworthy. 'refused' means the URL was never fetched. 'unreachable', 'redirected' and 'not_x402' all mean no challenge was obtained.",
+      ),
+      url: s("The URL that was checked"),
+      reachable: b("Whether the endpoint answered at all"),
+      http_status: n("Status code the endpoint returned"),
+      charges: {
+        type: "object",
+        description: "What the endpoint declares it will charge, right now",
+        properties: {
+          pay_to: s("Address that would receive the money"),
+          amount: s("Amount in the asset's smallest unit, as a string"),
+          asset: s("Token contract address"),
+          network: s("Chain the payment settles on"),
+          scheme: s("x402 payment scheme"),
+          price_usd: {
+            type: ["number", "null"],
+            description:
+              "Amount in dollars, or null when the token's decimals are unknown here. Null means unconverted, not free.",
+          },
+        },
+      },
+      first_seen: s("ISO-8601 time this endpoint was first observed"),
+      last_seen: s("ISO-8601 time of the previous observation"),
+      times_seen: n("How many observations exist, across all callers"),
+      first_observation: b(
+        "True when there was no prior record, so an empty `drift` means nothing",
+      ),
+      drift: {
+        type: "array",
+        description:
+          "Differences from the last observation. Any severity 'critical' entry changes where money goes.",
+        items: {
+          type: "object",
+          properties: {
+            field: s("What changed"),
+            severity: s("'critical' or 'warning'"),
+            from: s("Previous value"),
+            to: s("Current value"),
+            note: s("Why it matters"),
+          },
+          required: ["field", "severity"],
+        },
+      },
+      matches_expectation: b("Present only when `expect` was supplied"),
+      mismatches: {
+        type: "array",
+        items: { type: "string" },
+        description: "How the live challenge disagrees with what you expected",
+      },
+      advice: s("Plain-language statement of what was and was not established"),
+    },
+    required: ["status"],
+  },
   meetings_summarize: {
     type: "object",
     properties: {

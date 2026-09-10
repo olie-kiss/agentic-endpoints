@@ -5,6 +5,8 @@ export interface Env {
   MEETINGS: DurableObjectNamespace;
   CREDITS: DurableObjectNamespace;
   STATS: DurableObjectNamespace;
+  /** Shared per-URL observation history for x402 endpoint verification. */
+  ENDPOINTS: DurableObjectNamespace;
 
   // Revenue watermark + rolling payment history
   MONITOR: KVNamespace;
