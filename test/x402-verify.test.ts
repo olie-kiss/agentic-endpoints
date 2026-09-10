@@ -627,3 +627,137 @@ describe("registry keying", () => {
     );
   });
 });
+
+describe("decoy resistance and per-option pricing", () => {
+  const opt = (
+    pay_to: string,
+    network: string,
+    amount: string,
+    asset = "0xusdc",
+  ) => ({ pay_to, network, asset, scheme: "exact", amount });
+
+  /**
+   * The re-baseline branch used to check payees globally. That let an
+   * endpoint move the recorded scope's payee to an attacker while keeping
+   * the old address alive on some other chain: a global membership test
+   * still found it, so a real swap was downgraded to an info note.
+   */
+  it("still raises a critical when a decoy keeps the old payee on another chain", () => {
+    const legacy = {
+      pay_to: "0xAAA",
+      amount: "3000",
+      asset: "0xusdc",
+      network: "base",
+      scheme: "exact",
+      options: undefined,
+    };
+    const drift = diffObservation(legacy, {
+      ...legacy,
+      pay_to: "0xBBB",
+      options: [
+        opt("0xBBB", "base", "3000"),
+        opt("0xAAA", "eip155:1", "3000"),
+      ],
+    });
+    const payTo = drift.find((d) => d.field === "pay_to");
+    expect(payTo?.severity).toBe("critical");
+  });
+
+  it("reports a price rise on an option that is not the primary one", () => {
+    const before = {
+      pay_to: "0xAAA",
+      amount: "3000",
+      asset: "0xusdc",
+      network: "base",
+      scheme: "exact",
+      options: [opt("0xAAA", "base", "3000"), opt("0xAAA", "eip155:1", "10000")],
+    };
+    const after = {
+      ...before,
+      options: [opt("0xAAA", "base", "3000"), opt("0xAAA", "eip155:1", "50000")],
+    };
+    const drift = diffObservation(before, after);
+    const amount = drift.find((d) => d.field === "amount");
+    expect(amount?.severity).toBe("warning");
+    expect(amount?.from).toBe("10000");
+    expect(amount?.to).toBe("50000");
+  });
+
+  it("stays silent when no option changed price", () => {
+    const o = {
+      pay_to: "0xAAA",
+      amount: "3000",
+      asset: "0xusdc",
+      network: "base",
+      scheme: "exact",
+      options: [opt("0xAAA", "base", "3000"), opt("0xAAA", "eip155:1", "10000")],
+    };
+    expect(diffObservation(o, { ...o })).toEqual([]);
+  });
+
+  /**
+   * A record written before per-option prices existed has no price for the
+   * non-primary options, so there is nothing to compare. Inventing a change
+   * from "unknown" would be a false alarm on migration.
+   */
+  it("does not invent a price change for options with no recorded price", () => {
+    const legacyish = {
+      pay_to: "0xAAA",
+      amount: "3000",
+      asset: "0xusdc",
+      network: "base",
+      scheme: "exact",
+      options: [
+        { pay_to: "0xAAA", network: "base", asset: "0xusdc", scheme: "exact" },
+        { pay_to: "0xAAA", network: "eip155:1", asset: "0xusdc", scheme: "exact" },
+      ],
+    };
+    const drift = diffObservation(legacyish, {
+      ...legacyish,
+      options: [opt("0xAAA", "base", "3000"), opt("0xAAA", "eip155:1", "10000")],
+    });
+    expect(drift.filter((d) => d.field === "amount")).toEqual([]);
+  });
+});
+
+describe("rebaseline payee grading", () => {
+  const legacy = {
+    pay_to: "0xAAA",
+    amount: "3000",
+    asset: "0xusdc",
+    network: "base",
+    scheme: "exact",
+    options: undefined,
+  };
+  const o = (pay_to: string, network: string, asset: string) => ({
+    pay_to,
+    network,
+    asset,
+    scheme: "exact",
+    amount: "3000",
+  });
+
+  /**
+   * The chain and the token are each still offered, but not together, so
+   * neither the network nor the asset critical fires. Without the global
+   * fallback the vanished payee would go unreported entirely.
+   */
+  it("flags a payee that is offered nowhere, even when no single field vanished", () => {
+    const drift = diffObservation(legacy, {
+      ...legacy,
+      pay_to: "0xBBB",
+      options: [o("0xBBB", "base", "0xdai"), o("0xBBB", "eip155:1", "0xusdc")],
+    });
+    expect(drift.find((d) => d.field === "pay_to")?.severity).toBe("critical");
+  });
+
+  it("does not call a pure chain move a payee change", () => {
+    const drift = diffObservation(legacy, {
+      ...legacy,
+      network: "eip155:1",
+      options: [o("0xAAA", "eip155:1", "0xusdc")],
+    });
+    expect(drift.some((d) => d.field === "pay_to")).toBe(false);
+    expect(drift.find((d) => d.field === "network")?.severity).toBe("critical");
+  });
+});

@@ -65,6 +65,11 @@ app.post("/verify", async (c) => {
   // An x402 endpoint answers on the method it advertises. POST is the common
   // case; the caller can override. The body is deliberately empty -- we want
   // the payment challenge, not to perform the work.
+  // Guarded rather than coerced: a non-string method would otherwise throw
+  // on .toUpperCase() and surface as a 500 instead of a 400.
+  if (body.method !== undefined && typeof body.method !== "string") {
+    return errorResponse("method must be GET, POST or HEAD", 400);
+  }
   const method = (body.method ?? "POST").toUpperCase();
   if (!["GET", "POST", "HEAD"].includes(method)) {
     return errorResponse("method must be GET, POST or HEAD", 400);
@@ -191,6 +196,7 @@ app.post("/verify", async (c) => {
       asset: o.asset,
       network: o.network,
       scheme: o.scheme,
+      amount: o.amount,
     })),
   };
 

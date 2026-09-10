@@ -224,12 +224,20 @@ export interface Observation {
   options?: ObservedOption[];
 }
 
-/** The parts of an option that decide where money goes. Price is not one. */
+/**
+ * One payment option as observed.
+ *
+ * `amount` is recorded but is deliberately NOT part of `optionKey`: an option
+ * that changes price is the same option at a new price, not a new option.
+ * Folding price into identity would report every reprice as an unknown payee
+ * appearing and the old one vanishing -- two criticals for a price change.
+ */
 export interface ObservedOption {
   pay_to: string | null;
   asset: string | null;
   network: string | null;
   scheme: string | null;
+  amount?: string | null;
 }
 
 /**
@@ -249,7 +257,15 @@ function optionKey(o: ObservedOption): string {
 /** Falls back to the primary fields for records written before options were stored. */
 function optionsOf(o: Observation): ObservedOption[] {
   if (o.options && o.options.length > 0) return o.options;
-  return [{ pay_to: o.pay_to, asset: o.asset, network: o.network, scheme: o.scheme }];
+  return [
+    {
+      pay_to: o.pay_to,
+      asset: o.asset,
+      network: o.network,
+      scheme: o.scheme,
+      amount: o.amount,
+    },
+  ];
 }
 
 export interface Drift {
@@ -302,11 +318,37 @@ export function diffObservation(
     // it is no longer on offer at all, that is a real change, not a migration
     // artefact, and is graded normally.
     if (!afterKeys.has(optionKey(known))) {
-      const nowPayees = new Set(after.map((o) => lc(o.pay_to)));
       const nowNetworks = new Set(after.map((o) => net(o.network)));
       const nowAssets = new Set(after.map((o) => lc(o.asset)));
 
-      if (!nowPayees.has(lc(known.pay_to))) {
+      /**
+       * Scoped to the recorded option's own chain and token, exactly as the
+       * non-rebaselining branch is. Checking globally would let a swap hide
+       * behind a decoy: move this scope's payee to the attacker, keep the
+       * old address alive on some other chain, and a global membership test
+       * still finds it -- downgrading a real payee change to an info note.
+       */
+      const knownScope = scopeOf(known);
+      const scopeStillOffered = after.some((x) => scopeOf(x) === knownScope);
+      const payeesInScope = new Set(
+        after.filter((x) => scopeOf(x) === knownScope).map((x) => lc(x.pay_to)),
+      );
+      const nowPayees = new Set(after.map((x) => lc(x.pay_to)));
+
+      /**
+       * If the recorded chain-and-token is still on offer, the question is
+       * whether it still pays the same address -- that catches the decoy.
+       * If that combination is gone entirely the payee did not change, the
+       * route did, and the network or asset critical below already says so;
+       * repeating it as a payee change would name an address that did not
+       * move. Only when the scope is gone AND the address is offered nowhere
+       * at all does it fall back to the global check.
+       */
+      const payeeGone = scopeStillOffered
+        ? !payeesInScope.has(lc(known.pay_to))
+        : !nowPayees.has(lc(known.pay_to));
+
+      if (payeeGone) {
         drift.push({
           field: "pay_to",
           from: known.pay_to,
@@ -482,6 +524,54 @@ export function diffObservation(
       note: rose
         ? "The price went up since it was last seen."
         : "The price changed since it was last seen.",
+    });
+  }
+
+  /**
+   * Prices of the options that are NOT the primary one.
+   *
+   * The block above only compares option 0. Without this, an endpoint
+   * offering [$0.003 on base, $0.01 on ethereum] could raise the second to
+   * $50 and nothing would be reported at all -- a client paying on Ethereum
+   * would see the rise nowhere, while `first_observation: false` implied the
+   * comparison had been thorough.
+   *
+   * Matched by option identity, which excludes price, so a reprice is read
+   * as the same option costing more rather than as a new payee appearing.
+   */
+  const beforeAmounts = new Map(
+    before.map((x) => [optionKey(x), x.amount ?? null] as const),
+  );
+  const primaryPairIntact = optionKey(before[0]) === optionKey(after[0]);
+
+  for (const option of after) {
+    const key = optionKey(option);
+    // Already reported by the primary-option comparison above.
+    if (primaryPairIntact && key === optionKey(after[0])) continue;
+    if (!beforeAmounts.has(key)) continue; // Newly added; graded as an option.
+
+    const was = beforeAmounts.get(key) ?? null;
+    // A record predating per-option prices has no price for this option, so
+    // there is nothing to compare it against. Silence beats a false change.
+    if (was === null) continue;
+
+    const now = option.amount ?? null;
+    if (now === null || was === now) continue;
+
+    const wasNum = Number(was);
+    const nowNum = Number(now);
+    const rose =
+      Number.isFinite(wasNum) && Number.isFinite(nowNum) && nowNum > wasNum;
+    drift.push({
+      field: "amount",
+      from: was,
+      to: now,
+      severity: rose ? "warning" : "info",
+      note: rose
+        ? `The price of the ${option.network ?? "other"} payment option went ` +
+          "up since it was last seen."
+        : `The price of the ${option.network ?? "other"} payment option ` +
+          "changed since it was last seen.",
     });
   }
 

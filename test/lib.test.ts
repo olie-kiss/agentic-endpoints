@@ -296,3 +296,126 @@ describe("service catalogue", () => {
     }
   });
 });
+
+/** Deflate a latin1 string, as a PDF /FlateDecode stream would be stored. */
+async function deflate(text: string): Promise<Uint8Array> {
+  const raw = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) raw[i] = text.charCodeAt(i) & 0xff;
+  const cs = new Response(raw).body!.pipeThrough(new CompressionStream("deflate"));
+  return new Uint8Array(await new Response(cs).arrayBuffer());
+}
+
+function latin1(text: string): Uint8Array {
+  const out = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) out[i] = text.charCodeAt(i) & 0xff;
+  return out;
+}
+
+/**
+ * A PDF whose page content streams are genuinely Flate-compressed, so the
+ * inflate budget is actually consulted. `contents` are decoded in order.
+ */
+async function buildFlatePdf(contents: string[]): Promise<Uint8Array> {
+  const parts: Uint8Array[] = [];
+  let length = 0;
+  const push = (u: Uint8Array) => {
+    parts.push(u);
+    length += u.byteLength;
+  };
+
+  push(latin1("%PDF-1.4\n"));
+
+  const streamStart = 4;
+  const refs = contents.map((_, i) => `${streamStart + i} 0 R`).join(" ");
+  const fontNum = streamStart + contents.length;
+
+  const head = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [${refs}]` +
+      ` /Resources << /Font << /F1 ${fontNum} 0 R >> >> >>`,
+  ];
+  head.forEach((body, i) => push(latin1(`${i + 1} 0 obj\n${body}\nendobj\n`)));
+
+  for (let i = 0; i < contents.length; i++) {
+    const packed = await deflate(contents[i]);
+    push(
+      latin1(
+        `${streamStart + i} 0 obj\n<< /Filter /FlateDecode /Length ${packed.byteLength} >>\nstream\n`,
+      ),
+    );
+    push(packed);
+    push(latin1("\nendstream\nendobj\n"));
+  }
+
+  push(
+    latin1(
+      `${fontNum} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n`,
+    ),
+  );
+  push(latin1(`trailer\n<< /Size ${fontNum + 1} /Root 1 0 R >>\nstartxref\n0\n%%EOF\n`));
+
+  const out = new Uint8Array(length);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.byteLength;
+  }
+  return out;
+}
+
+/**
+ * The inflate budget used to be isolate-global. These exercise the real
+ * `total > budget.remaining` branch by lowering the ceiling, rather than by
+ * allocating the 128MB two concurrent parses would need at the true 64MB.
+ */
+describe("inflate budget", () => {
+  const page = (word: string) =>
+    `BT /F1 24 Tf 72 700 Td (${word}) Tj ET${" ".repeat(2000)}`;
+
+  it("refuses to inflate past the ceiling", async () => {
+    const pdf = await buildFlatePdf([page("Alpha")]);
+    const result = await extractPdfText(pdf, { inflateBudgetBytes: 64 });
+    expect(result.pages.map((p) => p.text).join("")).not.toContain("Alpha");
+  });
+
+  it("spends one budget across the whole document, not one per stream", async () => {
+    const first = page("Alpha");
+    const pdf = await buildFlatePdf([first, page("Beta")]);
+
+    // Enough for the first stream and nothing more. If each stream were
+    // given its own budget -- the regression that would silently remove the
+    // cumulative ceiling -- Beta would also decode.
+    const result = await extractPdfText(pdf, {
+      inflateBudgetBytes: first.length + 16,
+    });
+    const text = result.pages.map((p) => p.text).join("");
+    expect(text).toContain("Alpha");
+    expect(text).not.toContain("Beta");
+  });
+
+  /**
+   * Control. Without this, the two assertions above could both pass simply
+   * because the fixture never decodes at all, and would keep passing after
+   * the budget logic was removed entirely.
+   */
+  it("decodes every stream when the budget is not the constraint", async () => {
+    const pdf = await buildFlatePdf([page("Alpha"), page("Beta")]);
+    const text = (await extractPdfText(pdf)).pages.map((p) => p.text).join("");
+    expect(text).toContain("Alpha");
+    expect(text).toContain("Beta");
+  });
+
+  it("does not let one parse consume another's budget", async () => {
+    const starved = await buildFlatePdf([page("Alpha")]);
+    const healthy = await buildFlatePdf([page("Beta")]);
+
+    const [a, b] = await Promise.all([
+      extractPdfText(starved, { inflateBudgetBytes: 64 }),
+      extractPdfText(healthy),
+    ]);
+
+    expect(a.pages.map((p) => p.text).join("")).not.toContain("Alpha");
+    expect(b.pages.map((p) => p.text).join("")).toContain("Beta");
+  });
+});

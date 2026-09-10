@@ -78,8 +78,8 @@ interface InflateBudget {
   remaining: number;
 }
 
-function newInflateBudget(): InflateBudget {
-  return { remaining: MAX_TOTAL_INFLATED };
+function newInflateBudget(limit?: number): InflateBudget {
+  return { remaining: limit ?? MAX_TOTAL_INFLATED };
 }
 
 /**
@@ -601,8 +601,15 @@ function extractTextFromContent(
 
 export async function extractPdfText(
   bytes: Uint8Array,
+  /**
+   * Test-only. Lowering the ceiling is the only cheap way to exercise the
+   * exhaustion branch: doing it at the real 64MB would need ~128MB live
+   * across two concurrent parses and would exhaust the isolate. No handler
+   * passes this.
+   */
+  opts?: { inflateBudgetBytes?: number },
 ): Promise<PdfExtraction> {
-  const budget = newInflateBudget();
+  const budget = newInflateBudget(opts?.inflateBudgetBytes);
 
   const raw = toLatin1(bytes);
 
