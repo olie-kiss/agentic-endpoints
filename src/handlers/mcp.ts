@@ -44,7 +44,7 @@ const SERVER_INFO = {
   // listing close to useless — Smithery published us with a blank one because
   // it does not map `instructions`. Additive and ignored by spec-strict clients.
   description:
-    "Pay-per-call HTTP and MCP utilities for autonomous AI agents, settled in USDC on Base via the x402 protocol. No signup, no API keys, no subscription — an agent pays per request. Includes exactly-once idempotency claims, an encrypted vault, web scraping, PDF text extraction, and token compression.",
+    "Pay-per-call HTTP and MCP utilities for autonomous AI agents, settled in USDC on Base via the x402 protocol. No signup, no API keys, no subscription — an agent pays per request. Includes searchable meeting memory that answers questions with citations, a pre-flight check on other agents' x402 endpoints before you pay them, exactly-once idempotency claims, an encrypted vault, web scraping, PDF text extraction, and token compression.",
   websiteUrl: "https://ai.oliverkiss.com",
 } as const;
 
