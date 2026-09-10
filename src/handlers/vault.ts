@@ -25,6 +25,8 @@ app.post("/store", async (c) => {
     alg?: string;
     ttl?: number;
     namespace_token?: string;
+    if_match?: string;
+    if_absent?: boolean;
   }>(c);
 
   if (!body.namespace || !body.key || !body.ciphertext) {
@@ -45,6 +47,11 @@ app.post("/store", async (c) => {
         alg: body.alg,
         ttl: body.ttl,
         namespace_token: body.namespace_token,
+        // Conditional-write fields. Omitting these made the Durable Object's
+        // compare-and-swap unreachable: it saw both as undefined and every
+        // conditional write silently became last-write-wins.
+        if_match: body.if_match,
+        if_absent: body.if_absent,
       }),
     }),
   );

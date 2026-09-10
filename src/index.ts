@@ -633,6 +633,16 @@ export function buildRoutes(env: Env): RoutesConfig {
               description:
                 "Required once the namespace has been claimed by a first store",
             },
+            if_match: {
+              type: "string",
+              description:
+                "Compare-and-swap: the item's current updated_at. The write is refused with status 'precondition_failed' if the value changed since then, instead of silently clobbering it.",
+            },
+            if_absent: {
+              type: "boolean",
+              description:
+                "Create-only. Refuses with status 'precondition_failed' if the key already exists.",
+            },
           },
           required: ["namespace", "key", "ciphertext"],
         },

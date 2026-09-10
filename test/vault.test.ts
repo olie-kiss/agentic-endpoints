@@ -1,5 +1,7 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { Credits } from "../src/durable-objects/credits";
+import { hashToken } from "../src/lib/utils";
 
 async function vault(
   namespace: string,
@@ -433,5 +435,146 @@ describe("vault listing", () => {
     expect(res.status).toBe(200);
     expect(res.json.status).toBe("forbidden");
     expect(res.json.keys).toBeUndefined();
+  });
+});
+
+/**
+ * The compare-and-swap suite above drives the Durable Object directly, so it
+ * proved a guarantee no caller could actually reach: /vault/store forwarded a
+ * hand-listed set of fields and if_match/if_absent were not among them, so the
+ * DO always saw them undefined and every conditional write quietly degraded to
+ * last-write-wins. These go through the real HTTP route instead.
+ */
+describe("compare-and-swap survives the HTTP route", () => {
+  /** The buy route is itself paywalled, so open the account object directly. */
+  async function payingToken(token: string, micros = 5_000_000) {
+    const tokenHash = await hashToken(token);
+    const stub = env.CREDITS.get(env.CREDITS.idFromName(tokenHash));
+    await runInDurableObject(stub, (i: Credits) => i.open(tokenHash, micros));
+    return token;
+  }
+
+  function store(token: string, body: Record<string, unknown>) {
+    return SELF.fetch("https://ai.oliverkiss.com/vault/store", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Credit-Token": token },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("refuses to overwrite an existing key when if_absent is set", async () => {
+    const token = await payingToken("tok-cas-absent");
+    const namespace = "cas-http-absent-4f9c2ad1e6b74c08";
+
+    const first = await store(token, {
+      namespace,
+      key: "k",
+      ciphertext: "one",
+    });
+    const claimed = await first.json();
+    expect(claimed.status).toBe("stored");
+
+    const second = await store(token, {
+      namespace,
+      key: "k",
+      ciphertext: "two",
+      namespace_token: claimed.namespace_token,
+      if_absent: true,
+    });
+
+    expect((await second.json()).status).toBe("precondition_failed");
+  });
+
+  it("refuses a stale if_match rather than clobbering the newer value", async () => {
+    const token = await payingToken("tok-cas-match");
+    const namespace = "cas-http-match-0b3e71fa9d2c48e5";
+
+    const first = await store(token, { namespace, key: "k", ciphertext: "one" });
+    const claimed = await first.json();
+    const staleVersion = claimed.updated_at;
+    expect(staleVersion).toBeTruthy();
+
+    await store(token, {
+      namespace,
+      key: "k",
+      ciphertext: "two",
+      namespace_token: claimed.namespace_token,
+    });
+
+    const stale = await store(token, {
+      namespace,
+      key: "k",
+      ciphertext: "three",
+      namespace_token: claimed.namespace_token,
+      if_match: staleVersion,
+    });
+
+    expect((await stale.json()).status).toBe("precondition_failed");
+  });
+
+  it("accepts an if_match that is still current", async () => {
+    const token = await payingToken("tok-cas-current");
+    const namespace = "cas-http-current-7a1d4e60c8b2495f";
+
+    const first = await store(token, { namespace, key: "k", ciphertext: "one" });
+    const claimed = await first.json();
+
+    const next = await store(token, {
+      namespace,
+      key: "k",
+      ciphertext: "two",
+      namespace_token: claimed.namespace_token,
+      if_match: claimed.updated_at,
+    });
+
+    expect((await next.json()).status).toBe("stored");
+  });
+});
+
+/**
+ * Rotation used to re-check ownership by calling isOwner() a second time, which
+ * does not close the race it was written for: isOwner samples the owner hash on
+ * entry and only then awaits hashToken, so two concurrent rotations both compare
+ * against the same pre-await snapshot and both are told they succeeded. Only the
+ * last write survives, and there is deliberately no recovery path — so the loser
+ * is locked out holding a token this service confirmed as valid.
+ *
+ * Honest caveat: this test cannot force that interleaving. The Durable Object
+ * input gate serialises these requests, so it passes against the old code too.
+ * It stands as an invariant guard, not as proof of the fix. The fix itself --
+ * making the write conditional on the hash it authorised against -- is what
+ * closes the hole, and it costs nothing if the gate never opens.
+ */
+describe("concurrent token rotation", () => {
+  it("confirms at most one rotation, and the confirmed token is the one that works", async () => {
+    const namespace = ns();
+    const token = await claimed(namespace);
+
+    const rotations = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        vault(namespace, "/rotate-token", { namespace_token: token }),
+      ),
+    );
+
+    const rotated = rotations.filter((r) => r.json.status === "rotated");
+    expect(rotated.length).toBe(1);
+
+    // Every token this service handed back must actually open the namespace.
+    for (const winner of rotated) {
+      const check = await vault(namespace, "/exists", {
+        key: "seed",
+        namespace_token: winner.json.namespace_token,
+      });
+      expect(check.json.status).not.toBe("forbidden");
+    }
+
+    // The old token is gone. A rejection is reported as 200 with a
+    // "forbidden" status on purpose: any 4xx would cancel x402 settlement
+    // and leave the payment header replayable.
+    const stale = await vault(namespace, "/exists", {
+      key: "seed",
+      namespace_token: token,
+    });
+    expect(stale.json.status).toBe("forbidden");
   });
 });

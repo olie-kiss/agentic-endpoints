@@ -590,25 +590,41 @@ export class Vault extends DurableObject<Env> {
     // Requires the *current* token. There is deliberately no recovery path:
     // any mechanism that could restore access without it would be a second
     // way in, and would belong to an attacker just as readily as the owner.
-    if (!(await this.isOwner(body.namespace_token))) {
+    if (!body.namespace_token) {
       return this.unauthorized();
     }
 
+    const presentedHash = await hashToken(body.namespace_token);
     const token = generateToken();
     const hash = await hashToken(token);
 
-    // The await above yields. Re-checking under the same synchronous run
-    // stops two concurrent rotations from both reporting success while only
-    // one token actually works — which would lock the owner out of their own
-    // namespace using a token this service told them was valid.
-    if (!(await this.isOwner(body.namespace_token))) {
+    // Every await is above this line. The owner hash is read and the write is
+    // issued in one synchronous run, and the write itself carries the check:
+    // UPDATE ... WHERE token_hash = <the hash we authorised against>.
+    //
+    // Re-calling isOwner() here would not have been enough. It samples the
+    // owner hash on entry and only then awaits hashToken, so two concurrent
+    // rotations both compare against the same pre-await snapshot, both pass,
+    // and both callers are told their new token is valid when only the last
+    // one works. There is deliberately no recovery path, so that would lock
+    // an owner out of their own namespace holding a token this service
+    // confirmed.
+    const ownerHash = this.getOwnerHash();
+    if (ownerHash === null || !timingSafeEqual(presentedHash, ownerHash)) {
       return this.unauthorized();
     }
 
-    this.ctx.storage.sql.exec(
-      `UPDATE namespace_meta SET token_hash = ? WHERE id = 1`,
+    const written = this.ctx.storage.sql.exec(
+      `UPDATE namespace_meta SET token_hash = ? WHERE id = 1 AND token_hash = ?`,
       hash,
-    );
+      ownerHash,
+    ).rowsWritten;
+
+    // Lost the race: another rotation already replaced the token we checked
+    // against. Say so rather than hand back a token that was never installed.
+    if (written === 0) {
+      return this.unauthorized();
+    }
 
     return Response.json({
       status: "rotated",
