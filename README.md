@@ -748,6 +748,19 @@ services such as Mercury and Sphere Pay are not an option.
   `/verify` does nothing, which is why the catalogue held 0 of 28,095 of our
   routes. On testnet all 9 appeared within seconds. Announcing the mainnet
   catalogue costs $0.068, not the ~$1 assumed for months.
+- **`/meetings/summarize` has never run behind a real payment.** The parts
+  have been verified separately rather than end to end: the model, the
+  grounding prompt and its negative controls were exercised against Workers AI
+  directly (it declines when the transcript does not answer, cites both sides
+  when two meetings disagree, and will not conclude from a truncated
+  transcript), and `env.AI.run` was proven to work from inside a *deployed*
+  Durable Object using a throwaway Worker running the same model and message
+  shape. Retrieval, bounds and every no-answer path are covered by tests. What
+  has not been observed is one paid call traversing the whole chain, because
+  that needs USDC. Note the vitest pool cannot reach Workers AI at all —
+  inference there fails with an upstream internal error regardless of
+  `remote = true`, so a summarisation failure under test is the harness, not
+  the service.
 - **No evidence of demand.** `/stats` records the funnel precisely so that
   "nobody has found us" and "agents arrive and refuse to pay" stop looking
   identical. So far the answer is the first one.

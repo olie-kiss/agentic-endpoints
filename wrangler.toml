@@ -46,8 +46,16 @@ ENVIRONMENT = "development"
 # Used only by /meetings/summarize, which answers a question over
 # transcripts the caller already owns. Bindings are NOT inherited by named
 # environments, so this is repeated under [env.testnet.ai] below.
+#
+# `remote` affects local development and tests only, never a deployment.
+# Note it does NOT currently make the vitest pool reach the model: inference
+# through the test proxy fails with an upstream internal error regardless.
+# The binding path was verified instead by deploying a throwaway Worker that
+# called this exact model from inside a Durable Object, which succeeded --
+# so a failure under vitest is the harness, not this service.
 [ai]
 binding = "AI"
+remote = true
 
 # ── Revenue Monitoring ─────────────────────────────────────────────
 # Watermark and rolling payment history for the on-chain USDC watcher.
