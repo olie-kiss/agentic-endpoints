@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  checkUrl,
   parseChallenge,
   diffObservation,
   checkExpectation,
@@ -16,73 +15,6 @@ const PAYEE = "0x1111111111111111111111111111111111111111";
  * fetches it. Every refusal below is a network the caller would otherwise be
  * able to reach through us.
  */
-describe("checkUrl", () => {
-  it.each([
-    ["http://localhost/x", "loopback by name"],
-    ["http://127.0.0.1/x", "loopback literal"],
-    ["http://127.1.2.3/x", "the whole 127/8 block, not just .0.1"],
-    ["http://10.0.0.5/x", "RFC1918 class A"],
-    ["http://172.16.4.4/x", "RFC1918 class B, low end"],
-    ["http://172.31.255.1/x", "RFC1918 class B, high end"],
-    ["http://192.168.1.1/x", "RFC1918 class C"],
-    ["http://169.254.169.254/latest/meta-data/", "cloud metadata"],
-    ["http://100.64.0.1/x", "carrier-grade NAT"],
-    ["http://0.0.0.0/x", "unspecified address"],
-    ["http://[fd00::1]/x", "IPv6 unique-local"],
-    ["http://[fe80::1]/x", "IPv6 link-local"],
-    ["http://[::1]/x", "IPv6 loopback"],
-    ["http://db.internal/x", "internal TLD"],
-    ["http://printer.local/x", "mDNS name"],
-    ["file:///etc/passwd", "non-HTTP scheme"],
-    ["not a url", "unparseable"],
-  ])("refuses %s (%s)", (url) => {
-    expect(checkUrl(url).ok).toBe(false);
-  });
-
-  it.each([
-    "https://ai.oliverkiss.com/compress",
-    "http://example.com/api",
-    "https://172.32.0.1/x", // just outside RFC1918
-    "https://11.0.0.1/x", // just outside 10/8
-  ])("allows %s", (url) => {
-    expect(checkUrl(url).ok).toBe(true);
-  });
-
-  /**
-   * The standard SSRF filter bypasses. Every one of these is a valid URL that
-   * fetch() resolves to loopback or to cloud metadata, and a dotted-quad
-   * regex alone lets all of them through.
-   */
-  it.each([
-    ["http://2130706433/", "127.0.0.1 as a bare integer"],
-    ["http://0x7f000001/", "hexadecimal"],
-    ["http://0177.0.0.1/", "octal first octet"],
-    ["http://127.1/", "shorthand two-part form"],
-    ["http://127.0.1/", "shorthand three-part form"],
-    ["http://2852039166/", "169.254.169.254 as an integer"],
-    ["http://0xa9fea9fe/", "cloud metadata in hex"],
-    ["http://[::ffff:127.0.0.1]/", "IPv4-mapped IPv6"],
-    ["http://[::ffff:169.254.169.254]/", "metadata via IPv4-mapped IPv6"],
-    ["http://localhost./", "trailing dot on a loopback name"],
-    ["http://db.internal./", "trailing dot on an internal name"],
-    ["http://user:pass@127.0.0.1/", "credentials hiding the real host"],
-    ["http://public.example.com@127.0.0.1/", "a public name in the userinfo"],
-  ])("refuses %s (%s)", (url) => {
-    expect(checkUrl(url).ok).toBe(false);
-  });
-
-  it("does not refuse a public address that merely looks unusual", () => {
-    expect(checkUrl("http://0x08080808/").ok).toBe(true); // 8.8.8.8
-    expect(checkUrl("http://134744072/").ok).toBe(true); // 8.8.8.8
-  });
-
-  it("gives a reason, so a refusal is not mistaken for a network failure", () => {
-    const result = checkUrl("http://169.254.169.254/");
-    expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/link-local|Private/i);
-  });
-});
-
 /**
  * x402 v1 and v2 put the challenge in different places. An agent that only
  * understands one of them would read a live v2 endpoint as "not paid" and

@@ -3,11 +3,11 @@ import type { Env } from "../types";
 import { errorResponse } from "../lib/utils";
 import {
   checkExpectation,
-  checkUrl,
   parseChallenge,
   type Expectation,
   type Observation,
 } from "../lib/x402-verify";
+import { assertSafeUrl, UnsafeUrlError } from "../lib/url-guard";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -39,12 +39,20 @@ app.post("/verify", async (c) => {
 
   if (!body.url) return errorResponse("url is required", 400);
 
-  const safety = checkUrl(body.url);
-  if (!safety.ok) {
+  // The same guard /scrape and /pdf-parse use, rather than a second weaker
+  // one. It resolves the hostname over DNS-over-HTTPS and rejects private
+  // answers, which a purely lexical check cannot do: a name an attacker
+  // controls can point at 127.0.0.1 while looking perfectly public.
+  try {
+    await assertSafeUrl(body.url);
+  } catch (err) {
     return c.json({
       status: "refused",
       url: body.url,
-      detail: safety.reason,
+      detail:
+        err instanceof UnsafeUrlError
+          ? err.message
+          : "This URL could not be validated",
       advice:
         "This URL was not fetched. Only public HTTP(S) endpoints can be " +
         "verified.",
@@ -77,7 +85,14 @@ app.post("/verify", async (c) => {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   } catch (err) {
-    fetchError = err instanceof Error ? err.message : String(err);
+    // Coarse, deliberately. The raw error distinguishes DNS failure from
+    // connection refused from timeout, which is a free network-probe oracle
+    // for any host a caller names. /pdf-parse refuses to echo upstream
+    // details for the same reason; so does this.
+    fetchError =
+      err instanceof Error && err.name === "TimeoutError"
+        ? "timeout"
+        : "unreachable";
   }
 
   const registry = c.env.ENDPOINTS.get(c.env.ENDPOINTS.idFromName(body.url));
@@ -106,11 +121,15 @@ app.post("/verify", async (c) => {
     return c.json({
       status: "redirected",
       url: body.url,
-      http_status: response.status,
-      location: response.headers.get("location"),
+      /**
+       * The destination is deliberately not echoed. Reporting it back would
+       * turn a $0.003 call into a way to read an internal redirect target for
+       * any host the caller names.
+       */
       advice:
-        "This URL redirects and was not followed. Verify the destination URL " +
-        "directly, because that is where a payment would actually go.",
+        "This URL redirects and was not followed, so nothing was verified. " +
+        "Resolve the redirect yourself and verify the destination directly, " +
+        "because that is where a payment would actually go.",
     });
   }
 

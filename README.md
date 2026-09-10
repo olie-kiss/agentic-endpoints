@@ -661,11 +661,16 @@ moved.
 | `"status": "unreachable"` | Neither evidence of fraud nor of health. Nothing is recorded, so one timeout cannot manufacture a payee-change alarm later. `drift` is `null` rather than `[]`, because no comparison was made. |
 | `"price_usd": null` | The token's decimals are unknown here, so the amount was **not** converted. Not a claim that it is small. |
 | `"status": "not_x402"` | No challenge was found. The endpoint may be free, may want a different method, or may not use x402 at all. |
-| `"status": "refused"` | The URL was never fetched — private, loopback and link-local addresses are rejected before any request. |
+| `"status": "refused"` | The URL was never fetched. It is checked by the same outbound guard `/scrape` and `/pdf-parse` use, which resolves the hostname over DNS-over-HTTPS and rejects private answers — so a public name pointed at `127.0.0.1` is refused too. |
 
 Network identifiers are normalised before comparison, so an endpoint moving
 from x402 v1's `"base"` to v2's `"eip155:8453"` is correctly read as the same
 chain rather than as a critical chain change.
+
+Failures are reported coarsely (`timeout` or `unreachable`) and a redirect
+target is never echoed back. Reflecting the real error or the `Location` header
+would turn a $0.003 call into a network-probe oracle for any host a caller
+names.
 
 The word "safe" never appears in a response, deliberately. This reports what an
 endpoint declares about itself; it cannot certify an operator.
