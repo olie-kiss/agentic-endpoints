@@ -761,3 +761,56 @@ describe("rebaseline payee grading", () => {
     expect(drift.find((d) => d.field === "network")?.severity).toBe("critical");
   });
 });
+
+/**
+ * The exact arrangement that satisfied every other suppression at once, each
+ * by a different option: the recorded scope vanishes, an honest option keeps
+ * the old payee alive so the global check passes, and the attacker's option
+ * keeps the recorded chain on offer so no network critical fires.
+ */
+describe("chain takeover in a rebaselined record", () => {
+  const legacy = {
+    pay_to: "0xHONEST",
+    amount: "3000",
+    asset: "0xusdc",
+    network: "base",
+    scheme: "exact",
+    options: undefined,
+  };
+  const o = (pay_to: string, network: string, asset: string) => ({
+    pay_to,
+    network,
+    asset,
+    scheme: "exact",
+    amount: "3000",
+  });
+
+  it("flags a new address collecting on the recorded chain", () => {
+    const drift = diffObservation(legacy, {
+      ...legacy,
+      pay_to: "0xEVIL",
+      asset: "0xdai",
+      options: [o("0xEVIL", "base", "0xdai"), o("0xHONEST", "eip155:1", "0xusdc")],
+    });
+    const payTo = drift.find((d) => d.field === "pay_to");
+    expect(payTo?.severity).toBe("critical");
+    expect(payTo?.to).toBe("0xEVIL");
+  });
+
+  it("stays quiet when the endpoint simply left the chain", () => {
+    const drift = diffObservation(legacy, {
+      ...legacy,
+      network: "eip155:1",
+      options: [o("0xHONEST", "eip155:1", "0xusdc")],
+    });
+    expect(drift.some((d) => d.field === "pay_to")).toBe(false);
+  });
+
+  it("stays quiet when the recorded chain still pays the recorded address", () => {
+    const drift = diffObservation(legacy, {
+      ...legacy,
+      options: [o("0xHONEST", "base", "0xusdc"), o("0xHONEST", "eip155:1", "0xusdc")],
+    });
+    expect(drift.some((d) => d.severity === "critical")).toBe(false);
+  });
+});

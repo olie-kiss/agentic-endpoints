@@ -336,28 +336,56 @@ export function diffObservation(
       const nowPayees = new Set(after.map((x) => lc(x.pay_to)));
 
       /**
+       * The recorded chain, whoever it now pays. If this endpoint still
+       * offers the chain we have a record for but no option on that chain
+       * pays the address we recorded, the chain has changed hands -- even
+       * though the old address may still appear on some other chain, and
+       * even though neither the chain nor the token has vanished outright.
+       *
+       * Without this an attacker satisfies every other suppression with a
+       * different option: recorded base+usdc disappears, an honest eip155:1
+       * option keeps the old payee alive so the global check passes, and the
+       * attacker's base+dai option keeps `base` on offer so no network
+       * critical fires. A new address collects on Base for one info note.
+       *
+       * The `length > 0` guard is what keeps a pure chain move quiet: if the
+       * endpoint left the chain entirely there is no option to have taken it
+       * over, and the network critical below is the honest description.
+       */
+      const sameNetwork = after.filter(
+        (x) => net(x.network) === net(known.network),
+      );
+      const networkTakenOver =
+        sameNetwork.length > 0 &&
+        !sameNetwork.some((x) => lc(x.pay_to) === lc(known.pay_to));
+
+      /**
        * If the recorded chain-and-token is still on offer, the question is
        * whether it still pays the same address -- that catches the decoy.
-       * If that combination is gone entirely the payee did not change, the
-       * route did, and the network or asset critical below already says so;
-       * repeating it as a payee change would name an address that did not
-       * move. Only when the scope is gone AND the address is offered nowhere
-       * at all does it fall back to the global check.
+       * Otherwise the payee is only unchanged if the recorded chain has not
+       * been taken over AND the address is still offered somewhere.
        */
       const payeeGone = scopeStillOffered
         ? !payeesInScope.has(lc(known.pay_to))
-        : !nowPayees.has(lc(known.pay_to));
+        : networkTakenOver || !nowPayees.has(lc(known.pay_to));
+
+      const offendingPayee = scopeStillOffered
+        ? (after.find((x) => scopeOf(x) === knownScope)?.pay_to ??
+          after[0].pay_to)
+        : networkTakenOver
+          ? sameNetwork[0].pay_to
+          : after[0].pay_to;
 
       if (payeeGone) {
         drift.push({
           field: "pay_to",
           from: known.pay_to,
-          to: after[0].pay_to,
+          to: offendingPayee,
           severity: "critical",
           note:
-            "The receiving address earlier callers paid is no longer offered " +
-            "at all. Money now goes somewhere else entirely. Confirm out of " +
-            "band before paying.",
+            "The receiving address earlier callers paid is no longer on " +
+            "offer for the chain and token they used. Money now goes " +
+            "somewhere else. Confirm out of band before paying.",
         });
       }
       if (!nowNetworks.has(net(known.network))) {
