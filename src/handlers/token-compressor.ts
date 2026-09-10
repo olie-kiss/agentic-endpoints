@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env, CompressRequest } from "../types";
-import { errorResponse } from "../lib/utils";
+import { errorResponse, jsonBody } from "../lib/utils";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -25,7 +25,7 @@ const estimateTokens = (s: string) => Math.ceil(s.length / CHARS_PER_TOKEN);
  * Body: { text, target_tokens?, strategy? }
  */
 app.post("/", async (c) => {
-  const body = await c.req.json<CompressRequest>();
+  const body = await jsonBody<CompressRequest>(c);
 
   if (typeof body.text !== "string" || body.text.length === 0) {
     return errorResponse("text is required and must be a non-empty string", 400);

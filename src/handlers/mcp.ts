@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
+import { jsonBody } from "../lib/utils";
 
 /**
  * Remote MCP server (Streamable HTTP) exposing the paid endpoints as tools.
@@ -1021,7 +1022,7 @@ app.post("/", async (c) => {
     params?: Record<string, unknown>;
   };
   try {
-    body = await c.req.json();
+    body = await jsonBody(c);
   } catch {
     return rpcError(null, -32700, "Parse error", 400);
   }

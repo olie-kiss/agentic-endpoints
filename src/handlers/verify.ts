@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
-import { errorResponse } from "../lib/utils";
+import { errorResponse, jsonBody } from "../lib/utils";
 import {
   canonicalizeUrl,
   registryKeyFor,
@@ -33,11 +33,11 @@ const FETCH_TIMEOUT_MS = 8000;
  * what a single agent cannot do for itself.
  */
 app.post("/verify", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     url?: string;
     expect?: Expectation;
     method?: string;
-  }>().catch(() => ({}) as { url?: string; expect?: Expectation; method?: string });
+  }>(c).catch(() => ({}) as { url?: string; expect?: Expectation; method?: string });
 
   if (!body.url) return errorResponse("url is required", 400);
 

@@ -152,3 +152,23 @@ export function newNamespaceError(namespace: string): string | null {
 
   return null;
 }
+
+/**
+ * Read a JSON request body, normalising anything that is not a JSON object
+ * to an empty one.
+ *
+ * `c.req.json()` returns `null` for a body of literal `null`, and every
+ * handler then reads a property off it and throws a TypeError, which surfaces
+ * as a 500. A body of `null` is a malformed request, not a server fault: the
+ * handler's own "field is required" check should answer it, exactly as it
+ * already does for `[]`.
+ *
+ * A SyntaxError from genuinely unparseable input is deliberately left to
+ * propagate -- app.onError turns that into the 400 it should be.
+ */
+export async function jsonBody<T>(c: {
+  req: { json: <R>() => Promise<R> };
+}): Promise<T> {
+  const raw = await c.req.json<unknown>();
+  return (typeof raw === "object" && raw !== null ? raw : {}) as T;
+}

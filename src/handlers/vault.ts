@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { Env } from "../types";
-import { signReceipt, errorResponse } from "../lib/utils";
+import { signReceipt, errorResponse, jsonBody } from "../lib/utils";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -18,14 +18,14 @@ const app = new Hono<{ Bindings: Env }>();
  * Body: { namespace, key, ciphertext, alg?, ttl? }
  */
 app.post("/store", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace: string;
     key: string;
     ciphertext: string;
     alg?: string;
     ttl?: number;
     namespace_token?: string;
-  }>();
+  }>(c);
 
   if (!body.namespace || !body.key || !body.ciphertext) {
     return errorResponse("namespace, key, and ciphertext are required", 400);
@@ -71,11 +71,11 @@ app.post("/store", async (c) => {
  * Body: { namespace, key }
  */
 app.post("/retrieve", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace: string;
     key: string;
     namespace_token?: string;
-  }>();
+  }>(c);
 
   if (!body.namespace || !body.key) {
     return errorResponse("namespace and key are required", 400);
@@ -117,11 +117,11 @@ app.post("/retrieve", async (c) => {
  * Body: { namespace, key }
  */
 app.post("/delete", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace: string;
     key: string;
     namespace_token?: string;
-  }>();
+  }>(c);
 
   if (!body.namespace || !body.key) {
     return errorResponse("namespace and key are required", 400);
@@ -158,11 +158,11 @@ app.post("/delete", async (c) => {
  * Body: { namespace, key }
  */
 app.post("/exists", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace: string;
     key: string;
     namespace_token?: string;
-  }>();
+  }>(c);
 
   if (!body.namespace || !body.key) {
     return errorResponse("namespace and key are required", 400);
@@ -203,10 +203,10 @@ app.post("/exists", async (c) => {
  * Body: { namespace, namespace_token }
  */
 app.post("/list", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace: string;
     namespace_token?: string;
-  }>();
+  }>(c);
 
   if (!body.namespace) {
     return errorResponse("namespace is required", 400);
@@ -241,10 +241,10 @@ app.post("/list", async (c) => {
  * Body: { namespace, namespace_token }
  */
 app.post("/rotate-token", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace: string;
     namespace_token?: string;
-  }>();
+  }>(c);
 
   if (!body.namespace) {
     return errorResponse("namespace is required", 400);

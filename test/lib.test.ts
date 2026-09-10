@@ -419,3 +419,52 @@ describe("inflate budget", () => {
     expect(b.pages.map((p) => p.text).join("")).toContain("Beta");
   });
 });
+
+/**
+ * A body of literal `null` parses fine, so it reaches the handler as null and
+ * the first property read throws a TypeError -- surfacing as a 500 on what is
+ * really a malformed request. Found by fuzzing production: /once-key/complete,
+ * /once-key/release and /vault/rotate-token all returned 500.
+ *
+ * On a paid route a 500 also cancels x402 settlement, so this is the shape of
+ * bug that turns a charge into a free call.
+ */
+describe("null JSON bodies are client errors, not server faults", () => {
+  const freeJsonPosts = [
+    "/once-key/complete",
+    "/once-key/release",
+    "/vault/rotate-token",
+  ];
+
+  it.each(freeJsonPosts)("does not return 500 for a null body on %s", async (path) => {
+    const res = await SELF.fetch(`https://ai.oliverkiss.com${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "null",
+    });
+    expect(res.status).toBeLessThan(500);
+  });
+
+  it.each(freeJsonPosts)("answers a null body the same as an empty one on %s", async (path) => {
+    const call = (body: string) =>
+      SELF.fetch(`https://ai.oliverkiss.com${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+    const [nul, empty] = await Promise.all([call("null"), call("{}")]);
+    expect(nul.status).toBe(empty.status);
+  });
+
+  it("still rejects genuinely unparseable JSON as a 400", async () => {
+    const res = await SELF.fetch("https://ai.oliverkiss.com/once-key/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: "Request body must be valid JSON",
+    });
+  });
+});

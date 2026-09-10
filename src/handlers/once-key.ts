@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env, ClaimRequest } from "../types";
-import { signReceipt, errorResponse } from "../lib/utils";
+import { signReceipt, errorResponse, jsonBody } from "../lib/utils";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -66,7 +66,7 @@ async function forward(
  * Body: { namespace, action_key, payload_sha256?, ttl?, lease_ttl? }
  */
 app.post("/", async (c) => {
-  const body = await c.req.json<ClaimRequest>();
+  const body = await jsonBody<ClaimRequest>(c);
   return forward(c, "claim", body);
 });
 
@@ -82,9 +82,9 @@ app.post("/", async (c) => {
  * Body: { namespace, action_key, namespace_token, result?, ttl? }
  */
 app.post("/complete", async (c) => {
-  const body = await c.req.json<
+  const body = await jsonBody<
     ClaimRequest & { result?: unknown }
-  >();
+  >(c);
   return forward(c, "complete", body);
 });
 
@@ -97,7 +97,7 @@ app.post("/complete", async (c) => {
  * Body: { namespace, action_key, namespace_token }
  */
 app.post("/release", async (c) => {
-  const body = await c.req.json<ClaimRequest>();
+  const body = await jsonBody<ClaimRequest>(c);
   return forward(c, "release", body);
 });
 

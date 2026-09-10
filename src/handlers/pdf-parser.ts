@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env, PdfParseRequest } from "../types";
-import { errorResponse } from "../lib/utils";
+import { errorResponse, jsonBody } from "../lib/utils";
 import {
   assertSafeUrl,
   safeFetch,
@@ -35,7 +35,7 @@ const app = new Hono<{ Bindings: Env }>();
  * useful answer to an agent, and it is one we did the work to produce.
  */
 app.post("/", async (c) => {
-  const body = await c.req.json<PdfParseRequest>();
+  const body = await jsonBody<PdfParseRequest>(c);
 
   if (!body.url || typeof body.url !== "string") {
     return errorResponse("url is required", 400);

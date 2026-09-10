@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { Env } from "../types";
-import { errorResponse } from "../lib/utils";
+import { errorResponse, jsonBody } from "../lib/utils";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -38,7 +38,7 @@ async function callDo(
  * combinations are refused instead of resolved.
  */
 app.post("/import", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>();
+  const body = await jsonBody<Record<string, unknown>>(c);
 
   if (!body.namespace || typeof body.namespace !== "string") {
     return errorResponse("namespace is required", 400);
@@ -57,12 +57,12 @@ app.post("/import", async (c) => {
  * were skipped so an empty result is never mistaken for an absent meeting.
  */
 app.post("/search", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace?: string;
     namespace_token?: string;
     query?: string;
     limit?: number;
-  }>();
+  }>(c);
 
   if (!body.namespace) return errorResponse("namespace is required", 400);
   if (!body.query) return errorResponse("query is required", 400);
@@ -91,12 +91,12 @@ app.post("/search", async (c) => {
  * correct one and would be acted on.
  */
 app.post("/summarize", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace?: string;
     namespace_token?: string;
     question?: string;
     limit?: number;
-  }>();
+  }>(c);
 
   if (!body.namespace) return errorResponse("namespace is required", 400);
   if (!body.question) return errorResponse("question is required", 400);
@@ -112,11 +112,11 @@ app.post("/summarize", async (c) => {
 
 /** POST /meetings/get — $0.002. Returns one meeting in full. */
 app.post("/get", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace?: string;
     namespace_token?: string;
     meeting_id?: string;
-  }>();
+  }>(c);
 
   if (!body.namespace) return errorResponse("namespace is required", 400);
   if (!body.meeting_id) return errorResponse("meeting_id is required", 400);
@@ -131,11 +131,11 @@ app.post("/get", async (c) => {
 
 /** POST /meetings/list — $0.001. Metadata only; never returns content. */
 app.post("/list", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace?: string;
     namespace_token?: string;
     limit?: number;
-  }>();
+  }>(c);
 
   if (!body.namespace) return errorResponse("namespace is required", 400);
 
@@ -149,11 +149,11 @@ app.post("/list", async (c) => {
 
 /** POST /meetings/delete — $0.001. Removes the record and its index entry. */
 app.post("/delete", async (c) => {
-  const body = await c.req.json<{
+  const body = await jsonBody<{
     namespace?: string;
     namespace_token?: string;
     meeting_id?: string;
-  }>();
+  }>(c);
 
   if (!body.namespace) return errorResponse("namespace is required", 400);
   if (!body.meeting_id) return errorResponse("meeting_id is required", 400);

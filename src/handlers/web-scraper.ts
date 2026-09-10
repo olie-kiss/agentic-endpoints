@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env, ScrapeRequest } from "../types";
-import { errorResponse } from "../lib/utils";
+import { errorResponse, jsonBody } from "../lib/utils";
 import {
   assertSafeUrl,
   safeFetch,
@@ -25,7 +25,7 @@ const app = new Hono<{ Bindings: Env }>();
  * reported as 200 with a machine-readable `status`.
  */
 app.post("/", async (c) => {
-  const body = await c.req.json<ScrapeRequest>();
+  const body = await jsonBody<ScrapeRequest>(c);
 
   if (!body.url || typeof body.url !== "string") {
     return errorResponse("url is required", 400);
