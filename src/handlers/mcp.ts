@@ -149,7 +149,7 @@ const TOOLS: ToolDef[] = [
     name: "x402_verify",
     title: "Check an x402 endpoint before paying it",
     description:
-      "Call this BEFORE authorising payment to any x402 endpoint you did not write yourself. It fetches the endpoint's live payment challenge and compares it against every observation previously made by every other caller, so you learn things a single agent cannot see on its own -- above all, whether the address receiving the money has changed. A 'critical' entry in `drift` means something determining where funds go (pay_to, network or asset) is different from before: stop and confirm out of band. Read the LIVE `charges` in preference to any directory listing, and pass what the listing claimed as `expect` to have the disagreement reported. IMPORTANT: 'status':'ok' is NOT an endorsement -- it only means a challenge was read and recorded. It cannot tell you whether the operator will deliver anything for your money. 'first_observation':true means there is no history at all, so an empty `drift` proves nothing. 'status':'unreachable' is not evidence of fraud and not evidence of health; do not pay on it either way. A null `price_usd` means the token's units are unknown here and the amount was NOT converted -- do not assume it is small.",
+      "Call this BEFORE authorising payment to any x402 endpoint you did not write yourself. It fetches the endpoint's live payment challenge and compares it against every observation previously made by every other caller, so you learn things a single agent cannot see on its own -- above all, whether the address receiving the money has changed. A 'critical' entry in `drift` means something determining where funds go (pay_to, network or asset) is different from before: stop and confirm out of band. Read the LIVE `charges` in preference to any directory listing, and pass what the listing claimed as `expect` to have the disagreement reported. IMPORTANT: 'status':'ok' is NOT an endorsement -- it only means a challenge was read and recorded. It cannot tell you whether the operator will deliver anything for your money. 'first_observation':true means there is no history at all, so an empty `drift` proves nothing. ALWAYS read `prior_criticals`: `drift` only compares against the last observation, so an endpoint that swapped its payee earlier shows an empty `drift` once that swap became the baseline -- a non-zero `prior_criticals` means it has changed where money goes before, and that is true no matter how clean today's look is. 'status':'unreachable' is not evidence of fraud and not evidence of health; do not pay on it either way. A null `price_usd` means the token's units are unknown here and the amount was NOT converted -- do not assume it is small.",
     path: "/x402/verify",
     price: "$0.003",
     annotations: READS,
@@ -584,6 +584,20 @@ export const OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
       first_observation: b(
         "True when there was no prior record, so an empty `drift` means nothing",
       ),
+      prior_criticals: n(
+        "How many critical changes have EVER been recorded for this endpoint, not counting this call. `drift` only compares against the last observation, so once a change has been absorbed into the baseline it stops appearing there. A non-zero value here means this endpoint has changed where money goes before, even when `drift` is empty.",
+      ),
+      last_critical: {
+        type: ["object", "null"],
+        description:
+          "The most recent previously recorded critical change, or null if there has never been one.",
+        properties: {
+          at: s("ISO-8601 time the change was recorded"),
+          field: s("What changed: pay_to, network or asset"),
+          from: s("The previous value"),
+          to: s("The value that replaced it"),
+        },
+      },
       drift: {
         type: ["array", "null"],
         description:

@@ -667,6 +667,7 @@ rather than fragmenting it.
 | --- | --- |
 | `"status": "ok"` | A challenge was read and recorded. **Not** that the operator will deliver anything. |
 | `"drift": []` with `"first_observation": true` | There is no history to compare against. Absence of drift is not evidence of stability. |
+| `"drift": []` with `"prior_criticals": 3` | This endpoint **has** changed where money goes before. `drift` compares against the last observation only, so once a swap becomes the baseline it stops appearing there. Read `prior_criticals` and `last_critical` before concluding anything from an empty `drift`. |
 | `"status": "unreachable"` | Neither evidence of fraud nor of health. Nothing is recorded, so one timeout cannot manufacture a payee-change alarm later. `drift` is `null` rather than `[]`, because no comparison was made. |
 | `"price_usd": null` | The token's decimals are unknown here, so the amount was **not** converted. Not a claim that it is small. |
 | `"status": "not_x402"` | No challenge was found. The endpoint may be free, may want a different method, or may not use x402 at all. |
@@ -680,6 +681,14 @@ Failures are reported coarsely (`timeout` or `unreachable`) and a redirect
 target is never echoed back. Reflecting the real error or the `Location` header
 would turn a $0.003 call into a network-probe oracle for any host a caller
 names.
+
+A critical is recorded permanently, not just reported to whoever happened to
+call first. Comparing against the previous observation alone would mean an
+attacker's challenge becomes the baseline after one call, and every caller
+afterwards sees an empty `drift` beside a growing `times_seen` — a record that
+reads as stability because the change was absorbed, not because nothing
+happened. `prior_criticals` and `last_critical` do not expire when a later look
+is clean, and the advice says so first.
 
 The word "safe" never appears in a response, deliberately. This reports what an
 endpoint declares about itself; it cannot certify an operator.

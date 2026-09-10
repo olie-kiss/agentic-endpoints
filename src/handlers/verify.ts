@@ -247,6 +247,8 @@ app.post("/verify", async (c) => {
       expectation,
       challenge.options.some((o) => o.price_usd === null),
       challenge.options.length,
+      Number(seen.prior_criticals ?? 0),
+      (seen.last_critical as { at?: string } | null)?.at ?? null,
     ),
   });
 });
@@ -320,8 +322,27 @@ function buildAdvice(
   expectation: { matches: boolean; mismatches: string[] } | null,
   unknownUnits: boolean,
   optionCount: number,
+  priorCriticals: number,
+  lastCriticalAt: string | null,
 ): string {
   const parts: string[] = [];
+
+  /**
+   * A swap that happened before this call is still the most important thing
+   * known about the endpoint. Drift compares against the last observation
+   * only, so once an attacker's challenge becomes the baseline every later
+   * caller sees an empty drift and a growing times_seen -- a record that
+   * reads as stability because the change was absorbed rather than because
+   * nothing happened. Said first, and said even when today's look is clean.
+   */
+  if (priorCriticals > 0) {
+    parts.push(
+      `THIS ENDPOINT HAS CHANGED WHERE MONEY GOES BEFORE: ${priorCriticals} ` +
+        `critical change${priorCriticals === 1 ? " has" : "s have"} been ` +
+        `recorded here${lastCriticalAt ? `, most recently ${lastCriticalAt}` : ""}. ` +
+        "That history does not expire because a later look was clean.",
+    );
+  }
 
   if (criticalCount > 0) {
     parts.push(

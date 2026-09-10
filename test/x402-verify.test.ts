@@ -814,3 +814,46 @@ describe("chain takeover in a rebaselined record", () => {
     expect(drift.some((d) => d.severity === "critical")).toBe(false);
   });
 });
+
+describe("asset takeover in a rebaselined record", () => {
+  const legacy = {
+    pay_to: "0xHONEST",
+    amount: "3000",
+    asset: "0xusdc",
+    network: "base",
+    scheme: "exact",
+    options: undefined,
+  };
+  const o = (pay_to: string, network: string, asset: string) => ({
+    pay_to,
+    network,
+    asset,
+    scheme: "exact",
+    amount: "3000",
+  });
+
+  /**
+   * The mirror image of the chain takeover: the recorded chain keeps the
+   * honest payee, so the network check is satisfied, while the recorded
+   * token moves to an attacker on a different chain.
+   */
+  it("flags a new address collecting the recorded token", () => {
+    const drift = diffObservation(legacy, {
+      ...legacy,
+      asset: "0xdai",
+      options: [o("0xHONEST", "base", "0xdai"), o("0xEVIL", "eip155:1", "0xusdc")],
+    });
+    const payTo = drift.find((d) => d.field === "pay_to");
+    expect(payTo?.severity).toBe("critical");
+    expect(payTo?.to).toBe("0xEVIL");
+  });
+
+  it("stays quiet when the endpoint simply stopped taking that token", () => {
+    const drift = diffObservation(legacy, {
+      ...legacy,
+      asset: "0xdai",
+      options: [o("0xHONEST", "base", "0xdai")],
+    });
+    expect(drift.some((d) => d.field === "pay_to")).toBe(false);
+  });
+});

@@ -359,6 +359,14 @@ export function diffObservation(
         sameNetwork.length > 0 &&
         !sameNetwork.some((x) => lc(x.pay_to) === lc(known.pay_to));
 
+      // The same question on the token axis. Without it the mirror-image
+      // arrangement works: the recorded chain keeps the honest payee while
+      // the recorded token moves to an attacker on a different chain.
+      const sameAsset = after.filter((x) => lc(x.asset) === lc(known.asset));
+      const assetTakenOver =
+        sameAsset.length > 0 &&
+        !sameAsset.some((x) => lc(x.pay_to) === lc(known.pay_to));
+
       /**
        * If the recorded chain-and-token is still on offer, the question is
        * whether it still pays the same address -- that catches the decoy.
@@ -367,14 +375,18 @@ export function diffObservation(
        */
       const payeeGone = scopeStillOffered
         ? !payeesInScope.has(lc(known.pay_to))
-        : networkTakenOver || !nowPayees.has(lc(known.pay_to));
+        : networkTakenOver ||
+          assetTakenOver ||
+          !nowPayees.has(lc(known.pay_to));
 
       const offendingPayee = scopeStillOffered
         ? (after.find((x) => scopeOf(x) === knownScope)?.pay_to ??
           after[0].pay_to)
         : networkTakenOver
           ? sameNetwork[0].pay_to
-          : after[0].pay_to;
+          : assetTakenOver
+            ? sameAsset[0].pay_to
+            : after[0].pay_to;
 
       if (payeeGone) {
         drift.push({

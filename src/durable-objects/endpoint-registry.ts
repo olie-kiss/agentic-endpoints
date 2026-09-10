@@ -125,11 +125,32 @@ export class EndpointRegistry extends DurableObject<Env> {
         drift: null,
         recorded: false,
         first_observation: !existing,
+        prior_criticals: this.ctx.storage.sql
+          .exec(`SELECT COUNT(*) AS n FROM changes WHERE severity = 'critical'`)
+          .toArray()[0]?.n as number ?? 0,
       });
     }
 
     const current = body.observation;
     let drift: Drift[] = [];
+
+    /**
+     * Criticals recorded BEFORE this call, captured before the new rows are
+     * written so the current comparison cannot inflate its own history.
+     *
+     * Drift alone is against the last observation only, so the first caller
+     * after a payee swap gets the critical and their observation becomes the
+     * new baseline -- every caller after that sees an empty drift and a
+     * large times_seen, which reads as a long stable history at precisely
+     * the moment the endpoint changed hands. The evidence was already in
+     * this table; it was simply never handed back.
+     */
+    const priorCriticalRows = this.ctx.storage.sql
+      .exec(
+        `SELECT at, field, old, new FROM changes
+         WHERE severity = 'critical' ORDER BY id DESC`,
+      )
+      .toArray();
 
     if (existing) {
       const previous: Observation = {
@@ -208,6 +229,20 @@ export class EndpointRegistry extends DurableObject<Env> {
       times_seen: Number(row?.times_seen ?? 1),
       drift,
       recorded: true,
+      /**
+       * The endpoint's critical history, independent of whether THIS call
+       * happened to catch a change. A caller arriving after a swap has
+       * already been absorbed into the baseline still learns it happened.
+       */
+      prior_criticals: priorCriticalRows.length,
+      last_critical: priorCriticalRows[0]
+        ? {
+            at: priorCriticalRows[0].at as string,
+            field: priorCriticalRows[0].field as string,
+            from: (priorCriticalRows[0].old as string) ?? null,
+            to: (priorCriticalRows[0].new as string) ?? null,
+          }
+        : null,
       /**
        * True only when this is the very first look. The distinction matters:
        * "no drift" from a single observation is not evidence of stability,

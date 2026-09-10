@@ -179,3 +179,48 @@ describe("endpoint registry", () => {
     expect(changes.some((c) => c.field === "pay_to" && c.severity === "critical")).toBe(true);
   });
 });
+
+/**
+ * Drift compares against the last observation only, so a payee swap alarms
+ * exactly one caller and then becomes the baseline. Without a persistent
+ * record, every caller after that sees an empty drift beside a large
+ * times_seen -- which reads as a long stable history at precisely the moment
+ * the endpoint changed hands.
+ */
+describe("critical history outlives the observation that caught it", () => {
+  it("keeps reporting a swap to callers who arrive after it", async () => {
+    const url = endpointUrl();
+    await observe(url, observation());
+
+    const caught = await observe(
+      url,
+      observation({ pay_to: "0xATTACKER", options: undefined }),
+    );
+    expect(
+      (caught.drift as { severity: string }[]).some(
+        (d) => d.severity === "critical",
+      ),
+    ).toBe(true);
+    expect(caught.prior_criticals).toBe(0);
+
+    // A later caller sees nothing new, because the attacker's challenge is
+    // now the baseline. The history must still tell them.
+    const later = await observe(
+      url,
+      observation({ pay_to: "0xATTACKER", options: undefined }),
+    );
+    expect(later.drift).toEqual([]);
+    expect(later.first_observation).toBe(false);
+    expect(later.prior_criticals as number).toBeGreaterThan(0);
+    expect((later.last_critical as { field: string }).field).toBe("pay_to");
+    expect((later.last_critical as { to: string }).to).toBe("0xATTACKER");
+  });
+
+  it("reports no critical history for an endpoint that has never changed", async () => {
+    const url = endpointUrl();
+    await observe(url, observation());
+    const second = await observe(url, observation());
+    expect(second.prior_criticals).toBe(0);
+    expect(second.last_critical).toBe(null);
+  });
+})
