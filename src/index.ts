@@ -1555,6 +1555,8 @@ async function handleRequest(
         "Prepay to skip per-call signatures: $5 buys $6.00, $25 buys $32.50. POST /credits/buy",
       );
 
+      declareTrueMethod(headers, "POST");
+
       return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
@@ -1574,6 +1576,61 @@ async function handleRequest(
  * Parsed digit-wise rather than via parseFloat: $0.001 has no exact binary
  * representation, and a ledger that drifts by rounding is not a ledger.
  */
+/**
+ * Correct the HTTP method the payment challenge advertises to callers.
+ *
+ * Every paid route here is POST-only, but the challenge was telling crawlers
+ * otherwise. Routes are registered without a verb, so the paywall answers any
+ * method, and the bazaar extension's `enrichDeclaration` then overwrites the
+ * declared method with whatever method the *caller* happened to use. A
+ * directory that probes with GET is therefore told, by us, that the endpoint
+ * is a GET — and it publishes that. An agent reading the listing pays, sends
+ * GET, hits a route that only accepts POST, and gets a 404.
+ *
+ * That is the whole funnel lost at the last step, and the metadata blaming
+ * itself: the answer changes depending on who asks. x402-list.com published
+ * all eight endpoints as GET for exactly this reason.
+ *
+ * Fixed here rather than by registering routes as "POST /path", which would
+ * stop the paywall answering a GET at all. Uptime monitors probe with GET and
+ * score the unpaid handshake; turning their 402 into a 404 would cost the
+ * rating on the one distribution channel that works.
+ *
+ * A challenge that cannot be parsed is left untouched. Being unable to improve
+ * the advice is no reason to destroy it.
+ */
+export function declareTrueMethod(headers: Headers, method: string): void {
+  const encoded = headers.get("PAYMENT-REQUIRED");
+  if (!encoded) return;
+
+  try {
+    const challenge = JSON.parse(atob(encoded)) as Record<string, unknown>;
+    const bazaar = (challenge.extensions as Record<string, unknown> | undefined)
+      ?.bazaar as
+      | {
+          info?: { input?: Record<string, unknown> };
+          schema?: {
+            properties?: {
+              input?: { properties?: { method?: Record<string, unknown> } };
+            };
+          };
+        }
+      | undefined;
+
+    const input = bazaar?.info?.input;
+    if (!input || input.type === "mcp") return;
+
+    input.method = method;
+
+    const declared = bazaar?.schema?.properties?.input?.properties?.method;
+    if (declared) declared.enum = [method];
+
+    headers.set("PAYMENT-REQUIRED", btoa(JSON.stringify(challenge)));
+  } catch {
+    // Not a challenge we can rewrite. Leave the original in place.
+  }
+}
+
 function parsePriceMicros(price: string | undefined): number | null {
   if (!price) return null;
 

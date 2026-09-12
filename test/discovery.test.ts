@@ -166,3 +166,106 @@ describe("exactly-once lifecycle discovery", () => {
     }
   });
 });
+
+/**
+ * x402-list.com published all eight of these endpoints as GET. It did not get
+ * that wrong — we told it. Paid routes are registered without a verb, so the
+ * paywall answers any method, and the bazaar extension's enrichDeclaration
+ * then overwrites the declared method with the one the caller used. Probe with
+ * GET, get told "GET", publish GET. An agent that believes the listing pays,
+ * sends GET, and 404s on a POST-only route: the entire funnel lost at the last
+ * step, to metadata that answers differently depending on who asks.
+ *
+ * Unit-tested rather than driven through SELF.fetch because a paid route in
+ * the test pool cannot reach the facilitator and answers 503, never 402.
+ */
+import { declareTrueMethod } from "../src/index";
+
+describe("declaring the method that actually works", () => {
+  function challengeHeaders(input: Record<string, unknown>) {
+    const challenge = {
+      x402Version: 2,
+      accepts: [],
+      extensions: {
+        bazaar: {
+          info: { input },
+          schema: {
+            properties: {
+              input: {
+                properties: { method: { type: "string", enum: ["GET"] } },
+              },
+            },
+          },
+        },
+      },
+    };
+    return new Headers({ "PAYMENT-REQUIRED": btoa(JSON.stringify(challenge)) });
+  }
+
+  function read(headers: Headers) {
+    const bazaar = JSON.parse(atob(headers.get("PAYMENT-REQUIRED") as string))
+      .extensions.bazaar;
+    return {
+      info: bazaar.info.input.method,
+      schema: bazaar.schema.properties.input.properties.method.enum,
+    };
+  }
+
+  it("replaces the method a GET probe was echoed, in both info and schema", () => {
+    const headers = challengeHeaders({
+      type: "http",
+      method: "GET",
+      bodyType: "json",
+      body: { text: "hello" },
+    });
+
+    declareTrueMethod(headers, "POST");
+
+    expect(read(headers)).toEqual({ info: "POST", schema: ["POST"] });
+  });
+
+  it("leaves an MCP declaration alone, which has no HTTP method to correct", () => {
+    const headers = challengeHeaders({ type: "mcp", method: "GET" });
+    const before = headers.get("PAYMENT-REQUIRED");
+
+    declareTrueMethod(headers, "POST");
+
+    expect(headers.get("PAYMENT-REQUIRED")).toBe(before);
+  });
+
+  it("leaves a challenge it cannot parse exactly as it found it", () => {
+    const headers = new Headers({ "PAYMENT-REQUIRED": "not-base64-json" });
+
+    declareTrueMethod(headers, "POST");
+
+    expect(headers.get("PAYMENT-REQUIRED")).toBe("not-base64-json");
+  });
+
+  it("does nothing when there is no challenge to correct", () => {
+    const headers = new Headers();
+
+    declareTrueMethod(headers, "POST");
+
+    expect(headers.get("PAYMENT-REQUIRED")).toBeNull();
+  });
+
+  it("preserves the rest of the challenge, which facilitators parse", () => {
+    const headers = challengeHeaders({
+      type: "http",
+      method: "GET",
+      bodyType: "json",
+      body: { text: "hello" },
+    });
+
+    declareTrueMethod(headers, "POST");
+
+    const challenge = JSON.parse(
+      atob(headers.get("PAYMENT-REQUIRED") as string),
+    );
+    expect(challenge.x402Version).toBe(2);
+    expect(challenge.extensions.bazaar.info.input.body).toEqual({
+      text: "hello",
+    });
+    expect(challenge.extensions.bazaar.info.input.bodyType).toBe("json");
+  });
+});
