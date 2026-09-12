@@ -198,6 +198,25 @@ app.get("/robots.txt", (c) =>
   c.text(buildRobotsTxt(new URL(c.req.url).origin)),
 );
 
+/**
+ * Domain-ownership proof for the x402-list.com directory listing.
+ *
+ * The directory issues a one-time token and checks it is published here before
+ * accepting any change to the listing. Serving it from the Worker keeps the
+ * proof on the same origin the directory measures, with no DNS record and no
+ * static file to leave behind and forget.
+ *
+ * The token lives in a secret rather than in this file, so publishing a proof
+ * never means committing one. When no verification is in flight the secret is
+ * unset and this 404s, which is the honest answer: there is no proof to give.
+ */
+app.get("/.well-known/x402list.txt", (c) => {
+  const token = c.env.X402LIST_TOKEN;
+  if (!token) return c.json({ error: "Not found", path: c.req.path }, 404);
+
+  return c.text(`${token}\n`);
+});
+
 app.get("/sitemap.xml", (c) =>
   c.body(buildSitemap(new URL(c.req.url).origin), 200, {
     "Content-Type": "application/xml; charset=utf-8",

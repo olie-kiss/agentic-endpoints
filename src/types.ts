@@ -35,6 +35,15 @@ export interface Env {
    * settlement can be proven end to end without spending real USDC.
    */
   X402_NETWORK?: string;
+  /**
+   * One-time domain-proof token issued by x402-list.com when updating the
+   * directory listing. Set with `wrangler secret put X402LIST_TOKEN` while a
+   * verification is in flight and deleted once it passes: the token expires in
+   * 72 hours and has no use afterwards. Unset is the normal state, and the
+   * route reports "not found" rather than serving an empty proof file.
+   */
+  X402LIST_TOKEN?: string;
+
   // Optional: only needed if you switch to the CDP Facilitator for Bazaar indexing
   CDP_API_KEY_ID?: string;
   CDP_API_KEY_SECRET?: string;

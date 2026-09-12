@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 const ORIGIN = "https://ai.oliverkiss.com";
@@ -267,5 +267,40 @@ describe("declaring the method that actually works", () => {
       text: "hello",
     });
     expect(challenge.extensions.bazaar.info.input.bodyType).toBe("json");
+  });
+});
+
+/**
+ * x402-list.com will not accept a change to the listing until a one-time token
+ * it issues is published on this origin. Served from the Worker so the proof
+ * sits on the domain the directory already measures, with no DNS record and no
+ * stray static file left behind after the token expires.
+ */
+describe("domain-ownership proof for the directory listing", () => {
+  it("serves the token as a plain-text line when one is in flight", async () => {
+    (env as { X402LIST_TOKEN?: string }).X402LIST_TOKEN =
+      "x402list-verify-abc123";
+
+    try {
+      const res = await SELF.fetch(`${ORIGIN}/.well-known/x402list.txt`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Type")).toContain("text/plain");
+      expect(await res.text()).toBe("x402list-verify-abc123\n");
+    } finally {
+      delete (env as { X402LIST_TOKEN?: string }).X402LIST_TOKEN;
+    }
+  });
+
+  it("reports not found when no verification is in flight", async () => {
+    const res = await SELF.fetch(`${ORIGIN}/.well-known/x402list.txt`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it("is free: a proof behind a paywall cannot prove anything", async () => {
+    const res = await SELF.fetch(`${ORIGIN}/.well-known/x402list.txt`);
+
+    expect(res.status).not.toBe(402);
   });
 });
