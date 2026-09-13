@@ -337,6 +337,27 @@ export function buildLlmsTxt(routes: RoutesConfig, origin: string): string {
     "   only once. Send it as `X-Credit-Token` on any paid endpoint and the",
     "   list price is debited from your balance with no per-call signature.",
     "",
+    "## Agent-to-agent (A2A)",
+    "",
+    "This service is also an A2A agent. The card is at",
+    "/.well-known/agent-card.json (protocol 0.3, JSONRPC) and the transport",
+    "is POST /a2a.",
+    "",
+    "Every paid endpoint above is an A2A skill, which is unusual: A2A has no",
+    "payment step, so paid agents normally expose only their free operations",
+    "there. Here the credit token does the job — send `X-Credit-Token` on the",
+    "/a2a request and the skill runs in one round trip. Combined with the free",
+    "trial above, an A2A client needs no wallet at all to start.",
+    "",
+    "Name the skill in `message.metadata.skill`, or send a DataPart shaped",
+    "`{ skill, input }`. Skill ids are the route path without the leading",
+    "slash, with slashes replaced by dots: /once-key/complete is",
+    "`once-key.complete`. `skills/list` returns them all over JSON-RPC.",
+    "",
+    "Results come back as a Message whose DataPart is exactly the JSON the",
+    "HTTP route would have returned. No Tasks are created, so `tasks/get`",
+    "always reports not-found, and streaming is not offered.",
+    "",
     "### Concurrency",
     "",
     "Paid calls issued concurrently from the same wallet are refused a",
@@ -463,6 +484,7 @@ export function buildSitemap(origin: string): string {
     "/",
     "/llms.txt",
     "/openapi.json",
+    "/.well-known/agent-card.json",
     "/stats",
     "/status",
     "/health",
@@ -474,4 +496,101 @@ export function buildSitemap(origin: string): string {
     "</urlset>",
     "",
   ].join("\n");
+}
+
+/**
+ * Turns a route path into a stable A2A skill id: "/once-key/complete"
+ * becomes "once-key.complete". Ids are part of the published contract, so
+ * they are derived from the path rather than hand-maintained alongside it.
+ */
+export function skillId(path: string): string {
+  return path.replace(/^\//, "").replace(/\//g, ".");
+}
+
+/**
+ * The A2A Agent Card, generated from the same route config as the payment
+ * challenge and the OpenAPI document.
+ *
+ * Generated rather than written down because the alternative is a file that
+ * slowly stops describing the service: a price edited in one place and not
+ * the other is exactly the drift /x402/verify exists to catch in other
+ * people's endpoints.
+ *
+ * Targets A2A v0.3, not v1.0. v1.0 is the newer release, but v0.3 is what
+ * deployed clients and the current SDK compatibility mode actually speak,
+ * and an agent card nobody can parse is worth nothing.
+ */
+export function buildAgentCard(routes: RoutesConfig, origin: string) {
+  const paid = describeRoutes(routes)
+    .filter((r) => !r.path.startsWith("/credits/"))
+    .map((r) => ({
+      id: skillId(r.path),
+      name: r.path,
+      description: `${r.description} Costs ${r.price}.`,
+      tags: ["paid", "x402", ...r.path.replace(/^\//, "").split("/")],
+      examples: r.inputExample
+        ? [JSON.stringify({ skill: skillId(r.path), input: r.inputExample })]
+        : undefined,
+      inputModes: ["application/json"],
+      outputModes: ["application/json"],
+    }));
+
+  const free = FREE_POST_ENDPOINTS.map((e) => ({
+    id: skillId(e.path),
+    name: e.path,
+    description: `${e.description} Free.`,
+    tags: ["free", ...e.path.replace(/^\//, "").split("/")],
+    examples: e.example
+      ? [JSON.stringify({ skill: skillId(e.path), input: e.example })]
+      : undefined,
+    inputModes: ["application/json"],
+    outputModes: ["application/json"],
+  }));
+
+  return {
+    protocolVersion: "0.3.0",
+    name: "agentic-endpoints",
+    description:
+      "Pay-per-call utilities for autonomous agents: exactly-once action keys, " +
+      "a secret vault, meeting memory, token compression, scraping, PDF parsing " +
+      "and x402 endpoint verification. Every skill here is also a plain HTTP " +
+      "route. Unlike most paid A2A agents, the paid skills ARE callable over " +
+      "A2A: send an X-Credit-Token header, and get one free with no account at " +
+      "POST /credits/trial.",
+    url: `${origin}/a2a`,
+    preferredTransport: "JSONRPC",
+    additionalInterfaces: [{ url: `${origin}/a2a`, transport: "JSONRPC" }],
+    provider: { organization: "agentic-endpoints", url: origin },
+    version: "1.0.0",
+    documentationUrl: `${origin}/llms.txt`,
+    capabilities: {
+      // Both false and said so plainly. Advertising streaming we do not
+      // implement turns a client's first call into a hang.
+      streaming: false,
+      pushNotifications: false,
+      stateTransitionHistory: false,
+    },
+    defaultInputModes: ["application/json", "text/plain"],
+    defaultOutputModes: ["application/json"],
+    securitySchemes: {
+      creditToken: {
+        type: "apiKey",
+        in: "header",
+        name: "X-Credit-Token",
+        description:
+          "A prepaid or free-trial credit token. Get one instantly with no " +
+          "account at POST /credits/trial, or buy one at POST /credits/buy.",
+      },
+      x402Payment: {
+        type: "apiKey",
+        in: "header",
+        name: "X-PAYMENT",
+        description:
+          "A signed x402 payment authorization (USDC on Base, eip155:8453), " +
+          "as returned for the plain HTTP route of the same skill.",
+      },
+    },
+    security: [{ creditToken: [] }, { x402Payment: [] }],
+    skills: [...paid, ...free],
+  };
 }

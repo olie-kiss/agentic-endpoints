@@ -19,11 +19,13 @@ import webScraperHandler from "./handlers/web-scraper";
 import pdfParserHandler from "./handlers/pdf-parser";
 import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
+import a2aHandler from "./handlers/a2a";
 import creditsHandler, { creditsStub } from "./handlers/credits";
 import { hashToken, timingSafeEqual } from "./lib/utils";
 import { classifyCaller, detectSignal, recordBuyerSignal, SIGNAL_CONFIDENCE } from "./lib/tripwire";
 import { suppressBazaarSchemaNoise } from "./lib/log-noise";
 import {
+  buildAgentCard,
   buildLlmsTxt,
   buildOpenApi,
   buildRobotsTxt,
@@ -144,6 +146,13 @@ app.get("/", (c) => {
           method: "POST",
           price: "free",
           description: "Check a credit balance (requires X-Credit-Token)",
+        },
+        {
+          path: "/a2a",
+          method: "POST",
+          price: "free to list, per-skill price to call",
+          description:
+            "A2A (Agent2Agent) JSON-RPC transport, protocol 0.3. Card at /.well-known/agent-card.json. Every paid endpoint is a callable skill; send X-Credit-Token to pay for one.",
         },
         {
           path: "/mcp",
@@ -402,6 +411,32 @@ app.use("/mcp", async (c, next) => {
   await next();
 });
 app.route("/mcp", mcpHandler);
+
+/**
+ * A2A transport, dispatched the same way as MCP: every skill is an existing
+ * paid or free HTTP route, so there is one pricing and payment path rather
+ * than a second one that can drift from it.
+ */
+app.use("/a2a", async (c, next) => {
+  c.set("dispatch", (req: Request) => {
+    req.headers.set(INTERNAL_HEADER, internalDispatchToken());
+    return handleRequest(req, c.env, c.executionCtx as unknown as ExecutionContext);
+  });
+  await next();
+});
+app.route("/a2a", a2aHandler);
+
+/**
+ * The A2A Agent Card. Served at the canonical well-known path, with the
+ * pre-0.3 filename also answered: clients built against the older location
+ * are still deployed, and a card they cannot find is a card that does not
+ * exist.
+ */
+const agentCard = (c: { env: Env; req: { url: string }; json: (v: unknown) => Response }) =>
+  c.json(buildAgentCard(buildRoutes(c.env), new URL(c.req.url).origin));
+
+app.get("/.well-known/agent-card.json", agentCard);
+app.get("/.well-known/agent.json", agentCard);
 
 // ── Export with x402 payment layer ────────────────────────────────
 
@@ -1553,9 +1588,12 @@ async function handleRequest(
       // The barrier this removes is ordering, not price: paying per call needs
       // a funded wallet, so without this an agent must commit money before it
       // can find out whether the answer is worth buying.
+      // ASCII only: a non-ASCII header value throws a TypeError in browser
+      // fetch implementations, which would break the client on the exact
+      // response it most needs to read.
       headers.set(
         "X-Trial-Available",
-        "Evaluate free first: POST /credits/trial returns a $0.10 credit token instantly — no account, no email, no wallet.",
+        "Evaluate free first: POST /credits/trial returns a $0.10 credit token instantly, with no account, no email and no wallet.",
       );
 
       declareTrueMethod(headers, "POST");
@@ -1789,6 +1827,8 @@ const FREE_PATHS = new Set([
   "/",
   "/health",
   "/mcp",
+  "/a2a",
+  "/.well-known/agent-card.json",
   "/revenue",
   "/stats",
   "/status",
