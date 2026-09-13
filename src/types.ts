@@ -43,6 +43,21 @@ export interface Env {
    * route reports "not found" rather than serving an empty proof file.
    */
   X402LIST_TOKEN?: string;
+  /**
+   * Identity shown on the legal, privacy and compliance pages. Overridable by
+   * environment so that changing who operates the service, or where a dispute
+   * is heard, is a config change rather than an edit spread across five
+   * documents that would then drift apart.
+   */
+  LEGAL_ENTITY?: string;
+  LEGAL_JURISDICTION?: string;
+  SUPPORT_URL?: string;
+  /**
+   * Optional. Left unset deliberately until a mailbox exists: the refund
+   * policy commits to answering within five business days, and publishing an
+   * address that discards mail would make that commitment false.
+   */
+  SUPPORT_EMAIL?: string;
 
   // Optional: only needed if you switch to the CDP Facilitator for Bazaar indexing
   CDP_API_KEY_ID?: string;

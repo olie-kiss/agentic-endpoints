@@ -20,6 +20,7 @@ import pdfParserHandler from "./handlers/pdf-parser";
 import tokenCompressorHandler from "./handlers/token-compressor";
 import mcpHandler, { type Dispatcher } from "./handlers/mcp";
 import a2aHandler from "./handlers/a2a";
+import { complianceJson, documents, renderDoc } from "./pages/legal";
 import creditsHandler, { creditsStub } from "./handlers/credits";
 import { hashToken, timingSafeEqual } from "./lib/utils";
 import { classifyCaller, detectSignal, recordBuyerSignal, SIGNAL_CONFIDENCE } from "./lib/tripwire";
@@ -434,6 +435,20 @@ app.route("/a2a", a2aHandler);
  */
 const agentCard = (c: { env: Env; req: { url: string }; json: (v: unknown) => Response }) =>
   c.json(buildAgentCard(buildRoutes(c.env), new URL(c.req.url).origin));
+
+/**
+ * Legal, privacy and compliance pages. Registered from one list so a document
+ * cannot exist without a route, or a route without a document.
+ */
+for (const doc of documents({} as Env)) {
+  app.get(`/${doc.slug}`, (c) => {
+    const docs = documents(c.env);
+    const current = docs.find((d) => d.slug === doc.slug)!;
+    return c.html(renderDoc(current, docs, c.env));
+  });
+}
+
+app.get("/.well-known/compliance.json", (c) => c.json(complianceJson(c.env)));
 
 app.get("/.well-known/agent-card.json", agentCard);
 app.get("/.well-known/agent.json", agentCard);
@@ -1829,6 +1844,12 @@ const FREE_PATHS = new Set([
   "/mcp",
   "/a2a",
   "/.well-known/agent-card.json",
+  "/.well-known/compliance.json",
+  "/terms",
+  "/privacy",
+  "/refunds",
+  "/acceptable-use",
+  "/compliance",
   "/revenue",
   "/stats",
   "/status",

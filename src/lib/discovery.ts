@@ -485,6 +485,11 @@ export function buildSitemap(origin: string): string {
     "/llms.txt",
     "/openapi.json",
     "/.well-known/agent-card.json",
+    "/terms",
+    "/privacy",
+    "/refunds",
+    "/acceptable-use",
+    "/compliance",
     "/stats",
     "/status",
     "/health",
@@ -592,5 +597,16 @@ export function buildAgentCard(routes: RoutesConfig, origin: string) {
     },
     security: [{ creditToken: [] }, { x402Payment: [] }],
     skills: [...paid, ...free],
+    // Not an A2A field, but the question an operator asks before letting an
+    // agent transact with a stranger, and there is nowhere else on the card
+    // to answer it.
+    policies: {
+      terms: `${origin}/terms`,
+      privacy: `${origin}/privacy`,
+      refunds: `${origin}/refunds`,
+      acceptable_use: `${origin}/acceptable-use`,
+      compliance: `${origin}/compliance`,
+      compliance_json: `${origin}/.well-known/compliance.json`,
+    },
   };
 }
