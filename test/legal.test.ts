@@ -49,10 +49,38 @@ describe("legal pages", () => {
 
   it("does not publish a contact nobody reads", async () => {
     // A refund policy that commits to a reply within five business days must
-    // not point at an address that was invented to fill the field.
-    const doc = complianceJson({} as Env);
-    expect(doc.contact).toMatch(/^https?:\/\//);
-    expect(doc.contact).not.toContain("example.com");
+    // not point at an address invented to fill the field. Whatever is
+    // configured has to be either a real address or a real URL.
+    const configured = complianceJson({
+      SUPPORT_EMAIL: "ops@somewhere.invalid",
+    } as Env);
+    expect(configured.contact).toBe("ops@somewhere.invalid");
+
+    const unconfigured = complianceJson({} as Env);
+    expect(unconfigured.contact).toMatch(/^https?:\/\//);
+
+    for (const doc of [configured, unconfigured]) {
+      expect(doc.contact).not.toContain("example.com");
+      expect(doc.contact).not.toContain("@example");
+    }
+  });
+
+  it("falls back rather than publishing a malformed address", async () => {
+    // A typo in the env var would otherwise become a mailto: link that
+    // silently goes nowhere, which is the failure this whole field exists to
+    // avoid.
+    const broken = complianceJson({ SUPPORT_EMAIL: "not-an-email" } as Env);
+    expect(broken.contact).toMatch(/^https?:\/\//);
+  });
+
+  it("links a configured address as mailto, so a human can click it", async () => {
+    const env = { SUPPORT_EMAIL: "ops@somewhere.invalid" } as Env;
+    const docs = documents(env);
+    const { renderDoc } = await import("../src/pages/legal");
+
+    expect(renderDoc(docs[0], docs, env)).toContain(
+      'href="mailto:ops@somewhere.invalid"',
+    );
   });
 
   it("escapes content rather than interpolating it into the page", async () => {

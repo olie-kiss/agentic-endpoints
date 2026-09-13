@@ -42,6 +42,13 @@ head_sampling_rate = 1
 [vars]
 ENVIRONMENT = "development"
 
+# SUPPORT_EMAIL is set with `wrangler secret put SUPPORT_EMAIL`, not here.
+# The address is printed on public pages either way, so this is not about
+# keeping it secret -- it is about keeping it out of a public git repository
+# and its permanent history, where address harvesters scrape far more
+# aggressively than they crawl a website. Unset simply falls back to the
+# issue tracker.
+
 # ── Workers AI ─────────────────────────────────────────────────────
 # Used only by /meetings/summarize, which answers a question over
 # transcripts the caller already owns. Bindings are NOT inherited by named

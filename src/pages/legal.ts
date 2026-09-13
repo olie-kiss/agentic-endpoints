@@ -20,17 +20,28 @@ import type { Env } from "../types";
  * documents that will drift apart.
  */
 export function identity(env: Env) {
+  // A malformed address is treated as absent rather than published. The
+  // refund policy commits to answering, and a mailto: that cannot receive
+  // mail breaks that commitment more quietly than having no address at all.
+  const email = env.SUPPORT_EMAIL?.trim();
+  const usable = email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+
   return {
     entity: env.LEGAL_ENTITY ?? "Oliver Kiss, sole trader",
     jurisdiction: env.LEGAL_JURISDICTION ?? "British Columbia, Canada",
-    // Deliberately a URL, not an invented mailbox. A published address that
-    // silently discards mail is worse than none: the refund policy below
-    // commits to answering, and that commitment has to land somewhere real.
+    // A URL, not an invented mailbox: where no address is configured the
+    // issue tracker is somewhere that demonstrably receives messages.
     contactUrl:
       env.SUPPORT_URL ?? "https://github.com/olie-kiss/agentic-endpoints/issues",
-    contactEmail: env.SUPPORT_EMAIL ?? null,
+    contactEmail: usable,
     site: "https://ai.oliverkiss.com",
   };
+}
+
+/** Where the "contact" link on each page should point. */
+export function contactHref(env: Env): string {
+  const id = identity(env);
+  return id.contactEmail ? `mailto:${id.contactEmail}` : id.contactUrl;
 }
 
 export interface Doc {
@@ -295,7 +306,7 @@ ${doc.sections
         .join("\n")}`,
   )
   .join("\n")}
-<p class="meta">${escapeHtml(id.entity)} &middot; ${escapeHtml(id.jurisdiction)} &middot; <a href="${escapeHtml(id.contactUrl)}">contact</a><br />
+<p class="meta">${escapeHtml(id.entity)} &middot; ${escapeHtml(id.jurisdiction)} &middot; <a href="${escapeHtml(contactHref(env))}">contact</a><br />
 Machine-readable summary: <a href="/.well-known/compliance.json">/.well-known/compliance.json</a></p>
 </div></body></html>`;
 }
