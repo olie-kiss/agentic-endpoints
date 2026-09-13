@@ -94,6 +94,26 @@ export class Stats extends DurableObject<Env> {
         country TEXT
       )
     `);
+    /**
+     * What the would-be buyer actually got back.
+     *
+     * Added after nine payment attempts arrived on one afternoon and every
+     * one of them failed, leaving no way to tell whether the fault was ours
+     * or theirs. "Someone tried to pay" is only half a fact; without the
+     * outcome beside it, a broken funnel and an unfunded wallet look
+     * identical, and both look like nobody coming.
+     *
+     * ALTER rather than a new table so the existing rows survive, since those
+     * rows are the only record of the first people who ever tried to buy.
+     * They keep a null status, which is honest: we did not record it.
+     */
+    try {
+      this.ctx.storage.sql.exec(
+        `ALTER TABLE signal_events ADD COLUMN status INTEGER`,
+      );
+    } catch {
+      // Already added by an earlier run.
+    }
     this.initialized = true;
   }
 
@@ -162,6 +182,7 @@ export class Stats extends DurableObject<Env> {
     path: string,
     ua: string | null,
     country: string | null,
+    status: number | null = null,
   ): Promise<void> {
     this.ensureTable();
     const now = new Date().toISOString();
@@ -176,13 +197,14 @@ export class Stats extends DurableObject<Env> {
 
     if (confidence === "high") {
       this.ctx.storage.sql.exec(
-        `INSERT INTO signal_events (ts, signal, path, ua, country)
-         VALUES (?, ?, ?, ?, ?) ON CONFLICT (ts) DO NOTHING`,
+        `INSERT INTO signal_events (ts, signal, path, ua, country, status)
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (ts) DO NOTHING`,
         now,
         signal,
         path,
         ua,
         country,
+        status,
       );
       // Bounded by count, not age: the first payment attempt could be the
       // only one for months and must not be evicted for being old.
@@ -362,7 +384,7 @@ export class Stats extends DurableObject<Env> {
 
     const signalEvents = this.ctx.storage.sql
       .exec(
-        "SELECT ts, signal, path, ua, country FROM signal_events ORDER BY ts DESC LIMIT 20",
+        "SELECT ts, signal, path, ua, country, status FROM signal_events ORDER BY ts DESC LIMIT 20",
       )
       .toArray() as unknown as {
         ts: string;
@@ -370,6 +392,7 @@ export class Stats extends DurableObject<Env> {
         path: string;
         ua: string | null;
         country: string | null;
+        status: number | null;
       }[];
 
     return {
@@ -510,6 +533,8 @@ export interface StatsSummary {
       path: string;
       ua: string | null;
       country: string | null;
+      /** Null on rows written before the outcome was recorded. */
+      status: number | null;
     }[];
   };
 }

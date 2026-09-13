@@ -1,6 +1,8 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { Credits } from "../src/durable-objects/credits";
+import { statsStub } from "../src/index";
+import type { Env } from "../src/types";
 import { hashToken } from "../src/lib/utils";
 
 /** Reaches the account object directly; the buy route itself is paywalled. */
@@ -287,5 +289,70 @@ describe("paying with credits over HTTP", () => {
     });
 
     expect([402, 503]).toContain(res.status);
+  });
+});
+
+/**
+ * For thirty hours this service published "GET" as the way to call these
+ * endpoints, because the bazaar extension echoes back whichever method the
+ * asking crawler used. A buyer that believed us paid, landed on a route that
+ * only accepts POST, and got a 404.
+ *
+ * The refund machinery did its job -- nobody was billed for nothing -- which
+ * is exactly why this was invisible: no angry customer, no failed settlement,
+ * no error in the logs. Just a sale that quietly did not happen.
+ */
+describe("paying with the wrong method", () => {
+  it("delivers and bills on POST, and neither on GET", async () => {
+    const token = "tok-method-regression";
+    const tokenHash = await fund(token, 5_000_000);
+
+    const call = (method: string) =>
+      SELF.fetch("https://ai.oliverkiss.com/compress", {
+        method,
+        headers: { "Content-Type": "application/json", "X-Credit-Token": token },
+        ...(method === "GET"
+          ? {}
+          : { body: JSON.stringify({ text: "a sentence long enough to compress" }) }),
+      });
+
+    const posted = await call("POST");
+    expect(posted.status).toBe(200);
+
+    const got = await call("GET");
+    expect(got.status).toBe(404);
+
+    // Charged exactly once: for the call that actually did the work.
+    const { stub } = await account(token);
+    const ledger = await runInDurableObject(stub, (i: Credits) =>
+      i.balance(tokenHash),
+    );
+    expect(ledger?.call_count).toBe(1);
+    expect(ledger?.balance_micros).toBe(4_995_000);
+  });
+});
+
+/**
+ * The regression above proves the wrong method loses the sale. This proves we
+ * would now SEE it: the failure that hid for thirty hours was invisible
+ * because the attempt was recorded without its outcome.
+ */
+describe("a lost sale is visible afterwards", () => {
+  it("records the 404 a wrong-method buyer received", async () => {
+    const token = "tok-observed-failure";
+    await fund(token, 5_000_000);
+
+    await SELF.fetch("https://ai.oliverkiss.com/compress", {
+      method: "GET",
+      headers: { "Content-Type": "application/json", "X-Credit-Token": token },
+    });
+
+    const summary = await statsStub(env as unknown as Env).summary();
+    const failure = summary.buyer_signals.recent.find(
+      (e) => e.path === "/compress" && e.status === 404,
+    );
+
+    expect(failure).toBeDefined();
+    expect(failure?.signal).toBe("credit_use");
   });
 });

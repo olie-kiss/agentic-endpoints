@@ -62,6 +62,13 @@ export interface SignalContext {
   method: string;
   userAgent: string | null;
   country: string | null;
+  /**
+   * What the caller actually got back. Without it, a buyer this service broke
+   * and a buyer whose own wallet was empty produce the same record, and the
+   * difference between those two is the difference between a bug to fix and a
+   * market that is not there.
+   */
+  status?: number | null;
 }
 
 /**
@@ -115,6 +122,7 @@ export function recordBuyerSignal(signal: BuyerSignal, ctx: SignalContext): void
       // Truncated: a User-Agent is caller-controlled and unbounded.
       ua: ctx.userAgent?.slice(0, 120) ?? null,
       country: ctx.country,
+      status: ctx.status ?? null,
       at: new Date().toISOString(),
     }),
   );

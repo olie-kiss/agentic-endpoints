@@ -249,3 +249,52 @@ describe("buyer signals survive in storage", () => {
     expect(summary.buyer_signals.recent).toEqual([]);
   });
 });
+
+/**
+ * Nine payment attempts arrived on one afternoon and every one of them failed.
+ * All that survived was the attempt itself, so there was no way to tell
+ * whether this service had broken them or their own wallets were empty -- and
+ * for thirty hours it was advertising the wrong HTTP method, answering paying
+ * callers with 404. From a counter those two look identical: like nobody came.
+ */
+describe("a failed buyer is distinguishable from a served one", () => {
+  it("records what the caller actually got back", async () => {
+    const stub = ledger("signals-outcome");
+
+    await runInDurableObject(stub, (i: Stats) =>
+      i.recordSignal("payment_attempt", "high", "/compress", "buyer/1.0", "US", 404),
+    );
+    await runInDurableObject(stub, (i: Stats) =>
+      i.recordSignal("payment_attempt", "high", "/compress", "buyer/2.0", "US", 200),
+    );
+
+    const summary = await runInDurableObject(stub, (i: Stats) => i.summary());
+    const byUa = Object.fromEntries(
+      summary.buyer_signals.recent.map((e) => [e.ua, e.status]),
+    );
+
+    expect(byUa["buyer/1.0"]).toBe(404);
+    expect(byUa["buyer/2.0"]).toBe(200);
+
+    // The distinction the count alone could never make.
+    const failed = summary.buyer_signals.recent.filter(
+      (e) => e.status !== null && e.status >= 400,
+    );
+    expect(failed).toHaveLength(1);
+  });
+
+  it("keeps rows written before the outcome was recorded, with a null status", async () => {
+    // Those rows are the only record of the first people who ever tried to
+    // buy. Null is honest here; inventing a status would not be.
+    const stub = ledger("signals-legacy");
+
+    await runInDurableObject(stub, (i: Stats) =>
+      i.recordSignal("payment_attempt", "high", "/compress", "old-row/1.0", "US"),
+    );
+
+    const summary = await runInDurableObject(stub, (i: Stats) => i.summary());
+
+    expect(summary.buyer_signals.recent[0].ua).toBe("old-row/1.0");
+    expect(summary.buyer_signals.recent[0].status).toBeNull();
+  });
+});

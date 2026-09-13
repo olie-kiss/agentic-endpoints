@@ -1433,43 +1433,10 @@ async function handleRequest(
     );
 
     /**
-     * Buyer detection, ahead of the credit and x402 gates so that a refusal
-     * is still observed. Both gates can answer without reaching application
-     * code, which is precisely the case worth knowing about.
+     * Buyer detection now happens in withStats, once the response status is
+     * known. See the comment there: recording the attempt without its outcome
+     * is what let a broken funnel look exactly like an empty one.
      */
-    if (!internal) {
-      const signal = detectSignal(
-        isPaidPath,
-        request.headers.has("X-PAYMENT"),
-        request.headers.has("X-Credit-Token"),
-        classifyCaller(request.headers.get("User-Agent")),
-      );
-      if (signal) {
-        const ua = request.headers.get("User-Agent");
-        const country =
-          (request as { cf?: { country?: string } }).cf?.country ?? null;
-        recordBuyerSignal(signal, {
-          path,
-          method: request.method,
-          userAgent: ua,
-          country,
-        });
-        // Also persisted: the log line is only readable while someone is
-        // tailing, so on its own it would miss a first customer who arrived
-        // overnight.
-        background(
-          ctx,
-          "record buyer signal",
-          statsStub(env).recordSignal(
-            signal,
-            SIGNAL_CONFIDENCE[signal],
-            path,
-            ua?.slice(0, 120) ?? null,
-            country,
-          ),
-        );
-      }
-    }
 
     if (!isPaidPath) {
       return app.fetch(request, env, ctx);
@@ -1877,6 +1844,7 @@ export function statsStub(env: Env) {
       path: string,
       ua: string | null,
       country: string | null,
+      status?: number | null,
     ): Promise<void>;
     summary(): Promise<StatsSummary>;
     slo(): Promise<Slo>;
@@ -1904,9 +1872,64 @@ async function withStats(
   // every tool call and invent traffic that never existed.
   if (isInternalDispatch(request)) return response;
 
+  const path = new URL(request.url).pathname;
+  const isPaid = isKnownPaidPath(env, path);
+
+  /**
+   * Buyer detection, recorded here because this is the first point at which
+   * both halves of the fact exist: that someone tried to pay, and what they
+   * got for it.
+   *
+   * Nine payment attempts arrived on one afternoon and every one failed. All
+   * that survived was the attempt, so there was no way to tell a broken
+   * funnel from an unfunded wallet -- and for thirty hours this service was
+   * advertising the wrong HTTP method, answering paying callers with 404.
+   * Both look identical from a counter: like nobody came.
+   *
+   * Deliberately after the response rather than before the payment gates. The
+   * gates answer without reaching application code, which is exactly the case
+   * worth seeing, and every one of those answers still passes through here.
+   */
   try {
-    const path = new URL(request.url).pathname;
-    const counted = classify(path, response.status, isKnownPaidPath(env, path));
+    const signal = detectSignal(
+      isPaid,
+      request.headers.has("X-PAYMENT"),
+      request.headers.has("X-Credit-Token"),
+      classifyCaller(request.headers.get("User-Agent")),
+    );
+    if (signal) {
+      const ua = request.headers.get("User-Agent");
+      const country =
+        (request as { cf?: { country?: string } }).cf?.country ?? null;
+      recordBuyerSignal(signal, {
+        path,
+        method: request.method,
+        userAgent: ua,
+        country,
+        status: response.status,
+      });
+      // Also persisted: the log line is only readable while someone is
+      // tailing, so on its own it would miss a first customer who arrived
+      // overnight.
+      background(
+        ctx,
+        "record buyer signal",
+        statsStub(env).recordSignal(
+          signal,
+          SIGNAL_CONFIDENCE[signal],
+          path,
+          ua?.slice(0, 120) ?? null,
+          country,
+          response.status,
+        ),
+      );
+    }
+  } catch (err) {
+    console.error("Failed to record buyer signal:", err);
+  }
+
+  try {
+    const counted = classify(path, response.status, isPaid);
     if (counted) {
       background(
         ctx,
