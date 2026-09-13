@@ -356,3 +356,114 @@ describe("a lost sale is visible afterwards", () => {
     expect(failure?.signal).toBe("credit_use");
   });
 });
+
+describe("free evaluation credit", () => {
+  /**
+   * The trial is unauthenticated and gives away real balance, so the tests
+   * that matter are the ones about what it refuses to do twice.
+   */
+  const ip = (v: string) => ({ "CF-Connecting-IP": v });
+
+  it("issues a working balance with no account, and the token actually buys", async () => {
+    const res = await SELF.fetch("https://ai.oliverkiss.com/credits/trial", {
+      method: "POST",
+      headers: ip("203.0.113.10"),
+    });
+    expect(res.status).toBe(200);
+
+    const body = await res.json<{
+      credit_token: string;
+      balance_usd: string;
+      trial: boolean;
+      exhausted: boolean;
+    }>();
+    expect(body.trial).toBe(true);
+    expect(body.exhausted).toBe(false);
+    expect(body.balance_usd).toBe("0.100000");
+    expect(body.credit_token).toMatch(/^ae_trial_[0-9a-f]{64}$/);
+
+    // The point of the endpoint is not that it returns a token; it is that an
+    // agent holding one receives real work without ever funding a wallet.
+    const work = await SELF.fetch("https://ai.oliverkiss.com/compress", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Credit-Token": body.credit_token,
+      },
+      body: JSON.stringify({
+        text: "Revenue rose sharply in the third quarter. ".repeat(80),
+        target_tokens: 20,
+      }),
+    });
+    expect(work.status).toBe(200);
+
+    // Asserting the actual contract: the answer is cut to the requested
+    // budget and is still real text, not merely that a 200 came back.
+    const out = await work.json<{
+      text: string;
+      original_length: number;
+      compressed_length: number;
+    }>();
+    expect(out.text).toBeTruthy();
+    expect(out.compressed_length).toBeLessThan(out.original_length);
+    expect(out.compressed_length).toBeLessThanOrEqual(20 * 4);
+    expect(out.text).toContain("Revenue");
+  });
+
+  it("does not hand the same caller a second allowance", async () => {
+    const claim = async () =>
+      (
+        await SELF.fetch("https://ai.oliverkiss.com/credits/trial", {
+          method: "POST",
+          headers: ip("203.0.113.20"),
+        })
+      ).json<{ credit_token: string; balance_usd: string }>();
+
+    const first = await claim();
+
+    // Spend it down, then ask again. A refill here would be an unlimited
+    // free tier wearing a cap.
+    const { tokenHash, stub } = await account(first.credit_token);
+    await runInDurableObject(stub, (i: Credits) => i.spend(tokenHash, 60_000));
+
+    const second = await claim();
+    expect(second.credit_token).toBe(first.credit_token);
+    expect(second.balance_usd).toBe("0.040000");
+  });
+
+  it("gives different callers their own allowance", async () => {
+    const one = await (
+      await SELF.fetch("https://ai.oliverkiss.com/credits/trial", {
+        method: "POST",
+        headers: ip("203.0.113.30"),
+      })
+    ).json<{ credit_token: string }>();
+    const two = await (
+      await SELF.fetch("https://ai.oliverkiss.com/credits/trial", {
+        method: "POST",
+        headers: ip("203.0.113.31"),
+      })
+    ).json<{ credit_token: string }>();
+
+    expect(one.credit_token).not.toBe(two.credit_token);
+  });
+
+  it("treats an IPv6 /64 as one caller", async () => {
+    // A single machine is routinely handed every address in a /64, so issuing
+    // per full address would be an unbounded supply of free allowances.
+    const a = await (
+      await SELF.fetch("https://ai.oliverkiss.com/credits/trial", {
+        method: "POST",
+        headers: ip("2001:db8:abcd:1234:1::1"),
+      })
+    ).json<{ credit_token: string }>();
+    const b = await (
+      await SELF.fetch("https://ai.oliverkiss.com/credits/trial", {
+        method: "POST",
+        headers: ip("2001:db8:abcd:1234:ffff:ffff:ffff:ffff"),
+      })
+    ).json<{ credit_token: string }>();
+
+    expect(b.credit_token).toBe(a.credit_token);
+  });
+});

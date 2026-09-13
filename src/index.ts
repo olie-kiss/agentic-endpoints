@@ -124,12 +124,21 @@ app.get("/", (c) => {
       version: "1.0.0",
       protocol: "x402",
       payment: {
+        free_trial:
+          "Start here: POST /credits/trial returns a $0.10 credit token instantly — no account, no email, no wallet.",
         per_call: "Send X-PAYMENT (x402, USDC on Base) with each request.",
         prepaid:
           "Or buy credits once at POST /credits/buy and send X-Credit-Token instead — no per-call signature.",
       },
       endpoints: [
         ...paid,
+        {
+          path: "/credits/trial",
+          method: "POST",
+          price: "free",
+          description:
+            "Free $0.10 evaluation credit, issued instantly with no account. One allowance per client address.",
+        },
         {
           path: "/credits/balance",
           method: "POST",
@@ -1541,6 +1550,14 @@ async function handleRequest(
         "Prepay to skip per-call signatures: $5 buys $6.00, $25 buys $32.50. POST /credits/buy",
       );
 
+      // The barrier this removes is ordering, not price: paying per call needs
+      // a funded wallet, so without this an agent must commit money before it
+      // can find out whether the answer is worth buying.
+      headers.set(
+        "X-Trial-Available",
+        "Evaluate free first: POST /credits/trial returns a $0.10 credit token instantly — no account, no email, no wallet.",
+      );
+
       declareTrueMethod(headers, "POST");
 
       return new Response(response.body, {
@@ -1653,7 +1670,7 @@ async function spendCredits(
         {
           error: "invalid_credit_token",
           detail:
-            "No such credit account. Buy credits at POST /credits/buy, or omit X-Credit-Token to pay per call with x402.",
+            "No such credit account. Get a free $0.10 trial token at POST /credits/trial, buy credits at POST /credits/buy, or omit X-Credit-Token to pay per call with x402.",
         },
         { status: 401 },
       );
@@ -1776,6 +1793,7 @@ const FREE_PATHS = new Set([
   "/stats",
   "/status",
   "/credits/balance",
+  "/credits/trial",
   // Counted individually rather than lumped into "other": a hit on one of
   // these is a machine reading the documentation, which is the earliest
   // visible sign that anything has discovered the service at all.

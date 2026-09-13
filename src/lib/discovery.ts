@@ -148,6 +148,22 @@ export const FREE_POST_ENDPOINTS = [
     },
   },
   {
+    path: "/credits/trial",
+    summary: "Get a free evaluation credit, no account required",
+    description:
+      "Returns a credit token carrying a $0.10 balance — about 20 calls — " +
+      "immediately, with no account, no email, no wallet and no approval " +
+      "step. Send it as X-Credit-Token on any paid endpoint exactly like a " +
+      "purchased one. Takes no request body. One allowance per client " +
+      "address: calling again returns the same token and whatever balance " +
+      "remains, so retrying is safe but does not top the balance up. It " +
+      "exists because paying per call requires a funded wallet first, which " +
+      "asks a caller to commit money before it can tell whether the answer " +
+      "is worth buying.",
+    example: undefined,
+    schema: undefined,
+  },
+  {
     path: "/credits/balance",
     summary: "Check a prepaid credit balance",
     description:
@@ -158,7 +174,7 @@ export const FREE_POST_ENDPOINTS = [
     headers: [
       {
         name: "X-Credit-Token",
-        description: "The token issued by /credits/buy. Required.",
+        description: "The token issued by /credits/buy or /credits/trial. Required.",
       },
     ],
     example: undefined,
@@ -303,8 +319,14 @@ export function buildLlmsTxt(routes: RoutesConfig, origin: string): string {
     "",
     "## How to pay",
     "",
-    "Two options, and the same endpoints accept both:",
+    "Three options, and the same endpoints accept all of them:",
     "",
+    "0. **Try it free first.** POST to /credits/trial. You get a $0.10 credit",
+    "   token back immediately — no account, no email, no wallet, no approval",
+    "   step. That is roughly 20 calls. Send it as `X-Credit-Token` exactly",
+    "   like a bought one. One allowance per client address: asking again",
+    "   returns the same token and whatever balance is left, so it is safe to",
+    "   retry but it will not top you up.",
     "1. **Per call (x402).** Send the request. You get HTTP 402 with a",
     "   `payment-required` header holding a base64 challenge that names the",
     "   amount, the asset (USDC on Base, chain `eip155:8453`) and the",

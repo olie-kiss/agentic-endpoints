@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../types";
 import type { Ledger } from "../durable-objects/credits";
-import { generateToken, hashToken } from "../lib/utils";
+import { clientKey, generateToken, hashToken, hmacHex } from "../lib/utils";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -60,6 +60,62 @@ async function mint(c: Context<{ Bindings: Env }>, path: string) {
 
 app.post("/buy", (c) => mint(c, "/credits/buy"));
 app.post("/buy-25", (c) => mint(c, "/credits/buy-25"));
+
+/**
+ * A free evaluation balance, issued with no account, no email and no approval.
+ *
+ * This exists because of an ordering problem that costs real sales: paying
+ * per call requires a funded wallet, so an agent must commit money *before*
+ * it can discover whether the answer is any good. A caller who cannot try
+ * cheaply mostly does not try at all.
+ *
+ * The allowance is granted per client address rather than per request. The
+ * token is derived from that address by HMAC instead of being random, so the
+ * same caller always addresses the same ledger: asking twice returns the
+ * balance that is left, never a fresh one. That makes the endpoint safe to
+ * retry, removes any need to track who has already been issued one, and caps
+ * the giveaway without storing a single identifier.
+ */
+export const TRIAL_GRANT_MICROS = 100_000; // $0.10 — 20 calls at the $0.005 median price.
+
+app.post("/trial", async (c) => {
+  const ip = clientKey(c.req.header("CF-Connecting-IP"));
+
+  // Keyed by address, not by token: the point is to rate-limit issuance to a
+  // caller who has not been given a token yet.
+  const { success } = await c.env.WRITE_RATE_LIMITER.limit({ key: `trial:${ip}` });
+  if (!success) {
+    return c.json(
+      { error: "rate_limited", detail: "Too many requests. Retry shortly." },
+      429,
+      { "Retry-After": "60" },
+    );
+  }
+
+  const token = `ae_trial_${await hmacHex(`trial:v1:${ip}`, c.env.RECEIPT_SECRET)}`;
+  const tokenHash = await hashToken(token);
+  const ledger = await creditsStub(c.env, tokenHash).open(tokenHash, TRIAL_GRANT_MICROS);
+
+  const exhausted = ledger.balance_micros <= 0;
+
+  return c.json({
+    credit_token: token,
+    balance_usd: ledger.balance_usd,
+    granted_usd: ledger.granted_usd,
+    paid: "$0.00",
+    trial: true,
+    exhausted,
+    usage:
+      "Send this token as the X-Credit-Token header on any paid endpoint. Each call is debited at that endpoint's list price and needs no wallet, signature or X-PAYMENT header.",
+    // Returned rather than discovered by a caller who thinks it has been
+    // short-changed: the balance is deliberately not per-request.
+    note: "One allowance per client address. Requesting again returns this same token and whatever balance remains — it does not top it up.",
+    next: exhausted
+      ? "This allowance is spent. Buy $6.00 of credit for $5.00 at POST /credits/buy, or pay per call with x402."
+      : "Buy $6.00 of credit for $5.00 at POST /credits/buy when this runs out.",
+    balance_url: "https://ai.oliverkiss.com/credits/balance",
+  });
+});
 
 /** Free: a buyer must be able to check what they have without spending it. */
 app.post("/balance", async (c) => {

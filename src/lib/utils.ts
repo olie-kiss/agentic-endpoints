@@ -4,13 +4,28 @@ import type { Env } from "../types";
  * Sign a receipt payload with HMAC-SHA256.
  * Returns a hex-encoded signature that callers can verify.
  */
-export async function signReceipt(
+export function signReceipt(
   payload: Record<string, unknown>,
   secret: string,
 ): Promise<string> {
-  // Fail closed. TextEncoder stringifies undefined to the literal bytes
-  // "undefined", so a missing secret would silently sign every receipt with
-  // a publicly known key — and the receipts would still look well-formed.
+  // Canonical JSON: JSON.stringify preserves insertion order, so two
+  // logically identical payloads can hash differently. A verifier that
+  // rebuilds the payload from named fields would then see a bogus mismatch.
+  //
+  // Deliberately not `async`: returning the inner promise directly avoids the
+  // extra adoption step an async function would add, which surfaces a
+  // rejection here as an unhandled one even when the caller awaits it.
+  return hmacHex(canonicalJson(payload), secret);
+}
+
+/**
+ * HMAC-SHA256 of a message, hex-encoded.
+ *
+ * Fails closed on a weak secret. TextEncoder stringifies undefined to the
+ * literal bytes "undefined", so a missing secret would silently sign with a
+ * publicly known key — and the output would still look well-formed.
+ */
+export async function hmacHex(message: string, secret: string): Promise<string> {
   if (typeof secret !== "string" || secret.length < 32) {
     throw new Error(
       "RECEIPT_SECRET is missing or too short (need >= 32 characters)",
@@ -25,14 +40,45 @@ export async function signReceipt(
     false,
     ["sign"],
   );
-  // Canonical JSON: JSON.stringify preserves insertion order, so two
-  // logically identical payloads can hash differently. A verifier that
-  // rebuilds the payload from named fields would then see a bogus mismatch.
-  const data = encoder.encode(canonicalJson(payload));
-  const sig = await crypto.subtle.sign("HMAC", key, data);
+  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(message));
   return [...new Uint8Array(sig)]
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/**
+ * Collapses a client address to the unit a free allowance is granted per.
+ *
+ * IPv4 is used whole. IPv6 is truncated to its /64 routing prefix, because a
+ * single machine is routinely handed every address inside one — granting per
+ * full IPv6 address would hand an attacker an unbounded supply of free
+ * allowances at no cost.
+ *
+ * An absent address collapses to one shared bucket. That is deliberately the
+ * strict direction: unidentifiable callers share a single allowance between
+ * them rather than each receiving their own.
+ */
+export function clientKey(ip: string | undefined | null): string {
+  const trimmed = (ip ?? "").trim().toLowerCase();
+  if (!trimmed) return "unknown";
+  if (!trimmed.includes(":")) return trimmed;
+
+  const [head, tail] = trimmed.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups =
+    tail === undefined
+      ? left
+      : [
+          ...left,
+          ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"),
+          ...right,
+        ];
+
+  return groups
+    .slice(0, 4)
+    .map((g) => (g || "0").replace(/^0+(?=.)/, ""))
+    .join(":");
 }
 
 /** Deterministic JSON with object keys sorted at every depth. */
