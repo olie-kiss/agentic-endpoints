@@ -30,14 +30,19 @@ Live at **https://ai.oliverkiss.com**
 | `/credits/buy` | POST | $5.00 | Buy $6.00 of prepaid credit (20% bonus) |
 | `/credits/buy-25` | POST | $25.00 | Buy $32.50 of prepaid credit (30% bonus) |
 | `/credits/balance` | POST | Free | Check a credit balance |
+| `/credits/trial` | POST | Free | $0.10 of credit, once, with no wallet and no account |
 | `/revenue` | GET | Free | On-chain USDC received, read from Base |
 | `/mcp` | POST | Free to list | Remote MCP server; each tool costs its route's price |
+| `/a2a` | POST | Free to list | A2A JSON-RPC transport; each skill costs its route's price |
 | `/` | GET | Free | Service discovery (JSON) or landing page (HTML) |
 | `/health` | GET | Free | Health check |
 | `/status` | GET | Free | Uptime, error rate and latency, derived from recorded behaviour |
 | `/stats` | GET | Free | Demand funnel: challenged, paid, free, by route |
 | `/llms.txt` | GET | Free | Prose description for a model given only a URL |
 | `/openapi.json` | GET | Free | OpenAPI 3.1 description |
+| `/.well-known/agent-card.json` | GET | Free | A2A Agent Card (all 21 skills) |
+| `/terms`, `/privacy`, `/refunds`, `/acceptable-use`, `/compliance` | GET | Free | Policies, as HTML |
+| `/.well-known/compliance.json` | GET | Free | The same policies, machine-readable |
 
 `GET /` content-negotiates: send `Accept: application/json` for the machine-readable
 endpoint catalogue, anything else gets the HTML landing page.
@@ -56,6 +61,67 @@ curl -i -X POST https://ai.oliverkiss.com/once-key \
   -H 'Content-Type: application/json' \
   -d '{"namespace":"demo","action_key":"abc123"}'
 ```
+
+## Try It Free
+
+Funding a wallet to find out whether a service is any good is the wrong order,
+and it was the single largest barrier in front of every paid route here. So
+`POST /credits/trial` hands out $0.10 of credit — about 20 calls — with no
+wallet, no signature and no account:
+
+```bash
+TOKEN=$(curl -sX POST https://ai.oliverkiss.com/credits/trial | jq -r .credit_token)
+curl -X POST https://ai.oliverkiss.com/compress \
+  -H "X-Credit-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"text":"...","target_tokens":50}'
+```
+
+The token is not issued and recorded; it is *derived* from the caller's address
+by HMAC, so asking twice returns the same ledger with whatever is left on it —
+never a refill. That needs no issuance table and no new Durable Object, and it
+is safe to retry, which matters because the caller is an agent that will retry.
+IPv6 addresses collapse to their /64 so a single machine cannot walk a
+subnet for more. Every 402 advertises the trial in an `X-Trial-Available`
+header, so an agent that hits the paywall learns the way around it in the same
+response.
+
+## Agent-to-Agent (A2A)
+
+The service speaks A2A v0.3 at `https://ai.oliverkiss.com/a2a`, with an Agent
+Card at `/.well-known/agent-card.json` (and the legacy `/.well-known/agent.json`).
+
+A2A has no payment step, which is why agents publishing x402 services usually
+declare their paid work out of scope for A2A and expose only the free parts.
+Credit here is a header rather than a protocol negotiation, so **every paid
+skill is callable over A2A in a single round trip** — all 21 of them — and the
+free trial means the caller needs no wallet to start:
+
+```bash
+curl -X POST https://ai.oliverkiss.com/a2a -H 'Content-Type: application/json' \
+  -H "X-Credit-Token: $TOKEN" -d '{
+    "jsonrpc":"2.0","id":1,"method":"message/send",
+    "params":{"message":{"role":"user","messageId":"m1","kind":"message",
+      "metadata":{"skill":"compress"},
+      "parts":[{"kind":"data","data":{"text":"...","target_tokens":50}}]}}}'
+```
+
+Name the skill in `message.metadata.skill`, or send a DataPart shaped
+`{ skill, input }`. A part that names a skill wins over one that only carries
+input, so a caller that sends both is never billed for the wrong endpoint.
+Skill ids are the route path with slashes as dots (`/once-key/complete` →
+`once-key.complete`). A non-standard `skills/list` method returns the catalogue.
+
+`message/send` always returns a `Message`, never a `Task`. The x402 resumption
+flow expects the server to hold the original input against a returned `taskId`,
+and this service stores nothing between calls — so a Task it could not resume
+would fail on the second leg. `tasks/get` therefore answers `-32001` honestly
+and streaming is refused with `-32004`, rather than advertising operations that
+would break. An unpaid call still returns the x402 challenge under the
+`a2a-x402` extension's metadata key, so a payment-aware client can sign and
+retry in one step.
+
+Calls arriving over `/a2a` re-enter the same route in-process, so they pass the
+identical pricing, payment, validation and body-cap path as direct HTTP.
 
 ## MCP Server
 
@@ -131,8 +197,30 @@ directories that crawl source repos can now see it too.
 
 Machine-readable descriptions are generated from the same pricing table that
 gates payment, so they cannot drift from what is actually charged: `/llms.txt`
-for a model handed a bare URL, `/openapi.json` for tooling, plus `/robots.txt`
-and `/sitemap.xml`. Tests assert the prices agree across all of them.
+for a model handed a bare URL, `/openapi.json` for tooling, the A2A Agent Card
+at `/.well-known/agent-card.json`, plus `/robots.txt` and `/sitemap.xml`. Tests
+assert the prices agree across all of them, and that the card advertises exactly
+the skills `/a2a` can actually run.
+
+## Policies
+
+A buyer — or the underwriter behind one — checks for these before sending money
+or data, and their absence is itself a reason to pass. `/terms`, `/privacy`,
+`/refunds`, `/acceptable-use` and `/compliance` are served as HTML, and
+`/.well-known/compliance.json` serves the same content machine-readably. Both
+render from one source, so they cannot disagree.
+
+They are written to be true of the code rather than boilerplate, and two tests
+exist purely to stop them quietly becoming lies: one asserts no client IP is
+recorded anywhere in `/stats`, and one asserts the free trial the refund policy
+points at still works.
+
+The support address is set with `wrangler secret put SUPPORT_EMAIL` rather than
+committed. It is printed on public pages either way, so this is not secrecy —
+it keeps the address out of a public repository's permanent history, which
+harvesters scrape far harder than they crawl a site. A malformed value falls
+back to the issue tracker instead of publishing a `mailto:` link that silently
+goes nowhere.
 
 ## Revenue Monitoring
 
@@ -301,6 +389,11 @@ npx wrangler secret put X402_PAY_TO
 
 # Required — HMAC key for signing JSON receipts
 npx wrangler secret put RECEIPT_SECRET
+
+# Optional — support address printed on the policy pages. A secret rather
+# than a var so it never enters this repository's public history. Left
+# unset, the policy pages point at the GitHub issue tracker instead.
+npx wrangler secret put SUPPORT_EMAIL
 ```
 
 > **Do not set `FACILITATOR_URL` unless you mean to override the default.**
@@ -879,16 +972,16 @@ services such as Mercury and Sphere Pay are not an option.
 - **No evidence of demand.** `/stats` records the funnel precisely so that
   "nobody has found us" and "agents arrive and refuse to pay" stop looking
   identical. So far the answer is the first one.
-- **No A2A Agent Card, deliberately.** Crawlers request
-  `/.well-known/agent-card.json` and `/.well-known/agent.json` roughly 80 times
-  a day and get a `404`, which is the correct answer. Under A2A v1.0 a card is
-  a binding declaration, not a description: §8.3.1 requires each interface to
-  "accurately declare its transport protocol and URL", §8.3.2 obliges clients
-  to call it, and §5.1/§3.1 make a declared interface owe all 11 operations
-  (`SendMessage`, `GetTask`, `ListTasks`, `CancelTask`, …). This is an MCP
-  server, not an A2A agent. Publishing a card would advertise a broken agent to
-  every A2A crawler and registry — strictly worse than the `404`. Revisit only
-  alongside a real A2A binding.
+- **The A2A card targets v0.3, not v1.0.** v1.0 is a breaking release
+  (PascalCase methods, `kind` discriminators dropped, `supportedInterfaces[]`),
+  and deployed clients still speak v0.3, so that is what is served. The earlier
+  objection to publishing a card at all — that v1.0 makes a declared interface
+  owe all 11 operations — is handled by declaring only what is implemented:
+  `tasks/get` returns `-32001` and streaming `-32004` rather than pretending.
+  A v1.0 card will be a second document, not an edit to this one.
+- **No A2A skill has been invoked by a stranger.** The transport is verified
+  end to end against production, including a paid skill run on trial credit,
+  but every caller so far has been us.
 - **`/scrape`, `/pdf-parse` and `/compress` compete with free libraries.** The
   defensible endpoints are `/once-key` and `/vault`: coordination primitives a
   single agent cannot self-host, because they answer questions about what
