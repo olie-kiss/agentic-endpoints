@@ -104,13 +104,24 @@ const RPC_ENDPOINTS = [
   "https://base.drpc.org",
   "https://1rpc.io/base",
   "https://mainnet.base.org",
+  "https://base.gateway.tenderly.co",
+  "https://base-pokt.nodies.app",
+  "https://base-mainnet.public.blastapi.io",
 ];
 
 function rpcEndpoints(env: Env): string[] {
   // An explicit override is a deliberate choice (usually a paid, authenticated
   // node) and must not be silently second-guessed by falling back to a public
   // one with different rate limits and retention.
-  return env.BASE_RPC_URL ? [env.BASE_RPC_URL] : RPC_ENDPOINTS;
+  if (env.BASE_RPC_URL) return [env.BASE_RPC_URL];
+
+  // Always starting at the same provider spends the whole quota of one free
+  // endpoint while the rest sit idle, so the list's first entry is reliably
+  // the first to answer 429 — which is how all four originally in this list
+  // came to be rate-limited at once. Rotating the starting point spreads the
+  // load, and the others still follow as fallbacks.
+  const offset = Math.floor(Date.now() / 60_000) % RPC_ENDPOINTS.length;
+  return [...RPC_ENDPOINTS.slice(offset), ...RPC_ENDPOINTS.slice(0, offset)];
 }
 
 async function rpcOnce<T>(
