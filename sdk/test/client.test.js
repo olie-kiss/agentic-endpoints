@@ -426,3 +426,50 @@ test("preserves the payment challenge across retries", async () => {
       },
     );
 });
+
+/**
+ * The client accepted a creditToken but offered no way to obtain one, so a
+ * developer installing this package with no wallet had nowhere to go: the
+ * only free route in was documented on a website they had no reason to read.
+ */
+test("startTrial returns a token that can be fed straight back in", async () => {
+  let called = null;
+  const fetchImpl = async (url, init) => {
+    called = { url: String(url), method: init?.method };
+    return new Response(
+      JSON.stringify({ credit_token: "ae_trial_abc", balance_usd: "0.100000" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+
+  const token = await AgenticEndpoints.startTrial({ fetch: fetchImpl });
+
+  assert.equal(token, "ae_trial_abc");
+  assert.match(called.url, /\/credits\/trial$/);
+  assert.equal(called.method, "POST");
+
+  // The whole point is that this composes without another round trip.
+  const client = new AgenticEndpoints({ creditToken: token, fetch: fetchImpl });
+  assert.ok(client instanceof AgenticEndpoints);
+});
+
+test("startTrial refuses to hand back a token with nothing on it", async () => {
+  const fetchImpl = async () =>
+    new Response(
+      JSON.stringify({ credit_token: "ae_trial_spent", exhausted: true, balance_usd: "0.000000" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  // A valid but empty token would otherwise surface later as a 402 the
+  // caller would debug as a payment bug.
+  await assert.rejects(
+    () => AgenticEndpoints.startTrial({ fetch: fetchImpl }),
+    /allowance is already spent/,
+  );
+});
+
+test("the payment error points at the free way out", async () => {
+  const err = new PaymentRequiredError("/compress", null);
+  assert.match(err.message, /startTrial/);
+  assert.match(err.message, /no wallet/);
+});

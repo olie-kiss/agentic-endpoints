@@ -73,7 +73,18 @@ The unsafe default would have been to turn leases on for everyone.
 ## Paying
 
 This library never touches your keys. A package that quietly wants your
-wallet is a package nobody should install. You have two options:
+wallet is a package nobody should install. You have three options:
+
+**Free trial** — no wallet, no account, no email. Start here:
+
+```ts
+const creditToken = await AgenticEndpoints.startTrial();
+const client = new AgenticEndpoints({ creditToken });
+```
+
+$0.10, roughly twenty calls. One allowance per caller: calling twice returns
+the same token and the balance left on it, never a fresh $0.10, so it is safe
+to call on start-up rather than storing the result.
 
 **Prepaid credits** — buy a balance once, pass the token:
 
@@ -89,9 +100,10 @@ import { wrapFetchWithPayment } from "x402-fetch";
 new AgenticEndpoints({ fetch: wrapFetchWithPayment(fetch, wallet) });
 ```
 
-Without either, paid endpoints throw `PaymentRequiredError`, which carries
-the raw x402 challenge from the `payment-required` response header. (Under
-x402 v2 the 402 body is legitimately empty — the challenge is in the header.)
+Without any of them, paid endpoints throw `PaymentRequiredError`, which names
+`startTrial()` and carries the raw x402 challenge from the `payment-required`
+response header. The 402 body also spells out the price and all three ways to
+pay; under x402 v2 the authoritative challenge is still the header.
 
 ### Refused payments are retried
 

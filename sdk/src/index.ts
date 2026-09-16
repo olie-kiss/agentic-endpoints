@@ -55,8 +55,11 @@ export class PaymentRequiredError extends Error {
   readonly challenge: string | null;
   constructor(path: string, challenge: string | null) {
     super(
-      `${path} requires payment and no payment was made. Pass a creditToken, ` +
-        "or an x402-aware fetch, when constructing the client.",
+      `${path} requires payment and no payment was made. The quickest fix ` +
+        "needs no wallet: await AgenticEndpoints.startTrial() returns a " +
+        "$0.10 credit token, then pass it as creditToken when constructing " +
+        "the client. Otherwise supply a bought creditToken or an x402-aware " +
+        "fetch.",
     );
     this.name = "PaymentRequiredError";
     this.challenge = challenge;
@@ -264,6 +267,54 @@ export class AgenticEndpoints {
     this.doFetch = options.fetch ?? globalThis.fetch;
     this.canPay = options.fetch !== undefined;
     this.maxPaymentRetries = Math.max(0, options.maxPaymentRetries ?? 2);
+  }
+
+  /**
+   * Obtains a free credit token: $0.10, roughly twenty calls, with no wallet,
+   * no signature, no account and no email.
+   *
+   * Static because it is what you call when you have nothing yet — needing a
+   * configured client to get the credential the client needs would be a
+   * circle. Feed the result straight back in:
+   *
+   * ```ts
+   * const creditToken = await AgenticEndpoints.startTrial();
+   * const client = new AgenticEndpoints({ creditToken });
+   * ```
+   *
+   * One allowance per caller. Calling twice returns the same token and
+   * whatever balance is left on it, never a fresh $0.10, so it is safe to
+   * call on every start-up rather than storing the result.
+   */
+  static async startTrial(
+    options: { baseUrl?: string; fetch?: typeof fetch } = {},
+  ): Promise<string> {
+    const baseUrl = (options.baseUrl ?? "https://ai.oliverkiss.com").replace(
+      /\/+$/,
+      "",
+    );
+    const doFetch = options.fetch ?? globalThis.fetch;
+
+    const res = await doFetch(`${baseUrl}/credits/trial`, { method: "POST" });
+    if (!res.ok) {
+      throw new Error(
+        `Could not start a trial: ${res.status} ${await res.text().catch(() => "")}`.trim(),
+      );
+    }
+
+    const body = (await res.json()) as { credit_token?: string; exhausted?: boolean };
+    if (!body.credit_token) throw new Error("Trial response carried no credit_token.");
+
+    // Surfaced rather than swallowed: the token is valid but worthless, and a
+    // caller told nothing would debug this as a payment bug.
+    if (body.exhausted) {
+      throw new Error(
+        "This caller's trial allowance is already spent. Buy credit at " +
+          `${baseUrl}/credits/buy, or pay per call with an x402-aware fetch.`,
+      );
+    }
+
+    return body.credit_token;
   }
 
   /**
