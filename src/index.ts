@@ -1584,14 +1584,20 @@ async function handleRequest(
     const response = await gatedApp.fetch(request, env, ctx);
 
     /**
-     * Advertise the prepaid option on the payment challenge — the one response
-     * every would-be buyer is guaranteed to see.
+     * Advertise the prepaid option and the free trial on the payment
+     * challenge — the one response every would-be buyer is guaranteed to see.
      *
-     * Added as a header rather than injected into the challenge body: that
-     * body is what facilitators and strict x402 parsers consume, and it is
-     * what got these routes indexed. A non-standard field there could cost the
-     * only distribution channel currently working, which is not a trade worth
-     * making for a marketing line.
+     * The headers below are the machine-routable form. The body is filled in
+     * as well, because it was previously the two bytes `{}`: an x402-native
+     * client reads the challenge from the PAYMENT-REQUIRED header and is
+     * fine, but every generic agent, LLM tool wrapper and human reads the
+     * body and learned nothing at all from it — not the price, not the free
+     * trial, not even that money was the problem.
+     *
+     * The earlier reasoning for leaving the body alone was that it is "what
+     * facilitators and strict x402 parsers consume". That is true of the
+     * challenge, which lives in the header and is not touched here. Nothing
+     * consumes the empty body.
      */
     if (response.status === 402 && !path.startsWith("/credits/")) {
       const headers = new Headers(response.headers);
@@ -1612,6 +1618,18 @@ async function handleRequest(
       );
 
       declareTrueMethod(headers, "POST");
+
+      const explained = await explainChallenge(response, headers, new URL(request.url).origin);
+      if (explained !== null) {
+        // Length changes with the body; a stale one truncates the response.
+        headers.delete("Content-Length");
+        headers.set("Content-Type", "application/json");
+        return new Response(explained, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      }
 
       return new Response(response.body, {
         status: response.status,
@@ -1685,6 +1703,101 @@ export function declareTrueMethod(headers: Headers, method: string): void {
   } catch {
     // Not a challenge we can rewrite. Leave the original in place.
   }
+}
+
+/**
+ * Renders an integer USDC amount (6 decimals) as dollars, without floats.
+ *
+ * Trailing zeros are trimmed but never below cents, so $0.005 stays "$0.005"
+ * and $5.00 does not degrade to "$5.0".
+ */
+function usdFromMicros(micros: string): string {
+  const padded = micros.padStart(7, "0");
+  const dollars = padded.slice(0, -6);
+  let fraction = padded.slice(-6);
+
+  while (fraction.length > 2 && fraction.endsWith("0")) {
+    fraction = fraction.slice(0, -1);
+  }
+
+  return `$${dollars}.${fraction}`;
+}
+
+/**
+ * Fills in the body of a payment challenge, which the x402 middleware leaves
+ * as the two bytes `{}`.
+ *
+ * Returns null — leaving the original untouched — whenever the route said
+ * anything of its own, so this can only ever add to silence.
+ *
+ * Everything here is derived from the live challenge rather than restated, so
+ * the body cannot advertise a price or a payee that differs from the one the
+ * caller is actually being asked to pay. The challenge itself is echoed under
+ * `accepts` for x402 v1 clients, which look for it in the body rather than in
+ * the PAYMENT-REQUIRED header.
+ */
+async function explainChallenge(
+  response: Response,
+  headers: Headers,
+  origin: string,
+): Promise<string | null> {
+  const existing = await response.clone().text();
+  if (existing.trim() !== "" && existing.trim() !== "{}") return null;
+
+  const encoded = headers.get("PAYMENT-REQUIRED");
+  let challenge: Record<string, unknown> = {};
+  try {
+    if (encoded) challenge = JSON.parse(atob(encoded)) as Record<string, unknown>;
+  } catch {
+    challenge = {};
+  }
+
+  const accepts = Array.isArray(challenge.accepts)
+    ? (challenge.accepts as Array<Record<string, unknown>>)
+    : [];
+  const first = accepts[0];
+  const resource = challenge.resource as { url?: string; description?: string } | undefined;
+
+  // Amounts are in the asset's smallest unit. Formatted digit-wise rather
+  // than through a float, for the same reason the credit ledger is: $0.005
+  // has no exact binary representation, and a challenge that misquotes its
+  // own price is worse than one that omits it.
+  const amount = typeof first?.amount === "string" ? first.amount : undefined;
+  const priceUsd = amount && /^\d+$/.test(amount) ? usdFromMicros(amount) : undefined;
+
+  return JSON.stringify(
+    {
+      error: "payment_required",
+      message:
+        "This endpoint is paid. The cheapest way to start is the free trial: it needs no wallet, no signature, no account and no email.",
+      ...(priceUsd ? { price: priceUsd } : {}),
+      resource: resource?.url,
+      ...(resource?.description ? { description: resource.description } : {}),
+      ways_to_pay: {
+        free_trial: {
+          how: `POST ${origin}/credits/trial`,
+          grant: "$0.10, about 20 calls",
+          then: "Retry this request with the returned token as an X-Credit-Token header.",
+          note: "One allowance per caller. Asking again returns the same token and the balance left on it.",
+        },
+        prepaid_credit: {
+          how: `POST ${origin}/credits/buy`,
+          detail: "$5 buys $6.00 of credit, $25 buys $32.50. Spend it with an X-Credit-Token header and sign nothing per call.",
+        },
+        per_call_x402: {
+          how: "Sign the challenge below and retry with an X-PAYMENT header.",
+          detail:
+            "The same challenge is in the PAYMENT-REQUIRED response header, base64-encoded, which is where x402 v2 clients read it.",
+        },
+      },
+      ...(accepts.length > 0 ? { accepts } : {}),
+      ...(challenge.x402Version ? { x402Version: challenge.x402Version } : {}),
+      docs: `${origin}/`,
+      openapi: `${origin}/openapi.json`,
+    },
+    null,
+    2,
+  );
 }
 
 function parsePriceMicros(price: string | undefined): number | null {

@@ -222,3 +222,76 @@ describe("request body cap", () => {
     expect(res.status).toBe(413);
   });
 });
+
+/**
+ * The payment challenge is the one response every would-be buyer is
+ * guaranteed to see, and for months its body was the two bytes `{}`. An
+ * x402-native client reads the challenge from the PAYMENT-REQUIRED header and
+ * never noticed; everything else — generic agents, LLM tool wrappers, people
+ * with curl — got a blank 402 and no way to discover the free trial.
+ */
+describe("payment challenge explains itself", () => {
+  async function challenge(path = "/compress") {
+    const res = await SELF.fetch(`https://ai.oliverkiss.com${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "hello world" }),
+    });
+    return { res, body: await res.json().catch(() => null) };
+  }
+
+  it("names the free way in, not only the paid ones", async () => {
+    const { res, body } = await challenge();
+    expect(res.status).toBe(402);
+
+    expect(body.error).toBe("payment_required");
+    expect(body.ways_to_pay.free_trial.how).toContain("/credits/trial");
+    // A caller must be told the token goes in a header, or it cannot spend it.
+    expect(body.ways_to_pay.free_trial.then).toMatch(/X-Credit-Token/);
+    expect(body.ways_to_pay.prepaid_credit.how).toContain("/credits/buy");
+    expect(body.ways_to_pay.per_call_x402.detail).toMatch(/PAYMENT-REQUIRED/);
+  });
+
+  it("quotes the price the caller is actually being charged", async () => {
+    const { res, body } = await challenge();
+
+    // Derived from the live challenge rather than restated, so this cannot
+    // drift from the amount in `accepts`.
+    expect(body.price).toBe("$0.005");
+
+    const encoded = res.headers.get("PAYMENT-REQUIRED");
+    const decoded = JSON.parse(atob(encoded!));
+    expect(decoded.accepts[0].amount).toBe("5000");
+    expect(body.accepts[0].payTo).toBe(decoded.accepts[0].payTo);
+  });
+
+  it("leaves the machine-readable challenge in the header untouched", async () => {
+    const { res } = await challenge();
+    const decoded = JSON.parse(atob(res.headers.get("PAYMENT-REQUIRED")!));
+
+    // Filling the body must not disturb what strict x402 parsers consume.
+    expect(decoded.x402Version).toBe(2);
+    expect(decoded.accepts[0].scheme).toBe("exact");
+    expect(decoded.accepts[0].asset).toMatch(/^0x/);
+  });
+
+  it("sends a body whose length matches what it declares", async () => {
+    const { res } = await challenge();
+    const declared = res.headers.get("Content-Length");
+    const actual = new TextEncoder().encode(await res.clone().text()).length;
+
+    // A stale Content-Length from the empty body would truncate the response
+    // to two bytes, which is worse than sending nothing.
+    if (declared !== null) expect(Number(declared)).toBe(actual);
+    expect(actual).toBeGreaterThan(2);
+  });
+
+  it("explains every paid route, not just the one that was checked", async () => {
+    for (const path of PAID_PATHS) {
+      if (path.startsWith("/credits/")) continue;
+      const { res, body } = await challenge(path);
+      if (res.status !== 402) continue;
+      expect(body?.ways_to_pay?.free_trial?.how, path).toContain("/credits/trial");
+    }
+  });
+});
