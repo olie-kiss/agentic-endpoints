@@ -85,6 +85,13 @@ subnet for more. Every 402 advertises the trial in an `X-Trial-Available`
 header, so an agent that hits the paywall learns the way around it in the same
 response.
 
+Over MCP the same trial is a tool. An MCP client controls a tool's arguments
+but usually cannot set a per-call HTTP header, so `credits_trial` issues the
+token and every paid tool accepts it as an optional `credit_token` argument —
+meaning a client with no wallet can go from `tools/list` to real work without
+ever setting a header. A refused tool call names that route explicitly rather
+than only quoting x402 at a caller that cannot sign.
+
 ## Agent-to-Agent (A2A)
 
 The service speaks A2A v0.3 at `https://ai.oliverkiss.com/a2a`, with an Agent
@@ -188,7 +195,7 @@ CDP Bazaar is skipped for exactly that reason.
 | x402-list.com | Submitted, pending review | `POST /api/v1/submit`; free because the service is on a custom domain |
 | Official MCP Registry | **Published — `com.oliverkiss/agentic-endpoints`, status active** | `./scripts/publish-registry.sh`. Ownership proven by an apex TXT record and an ed25519-signed timestamp, so no financial account is involved |
 | npm | **Published — [`agentic-endpoints`](https://www.npmjs.com/package/agentic-endpoints)** | `cd sdk && npm publish`. Counts as discovery, not just convenience: npm is crawled by every AI coding assistant, so the client is findable by the same models that would use the service |
-| Smithery | **Published — [`kiss-olie/agentic-endpoints`](https://smithery.ai/servers/kiss-olie/agentic-endpoints)**, quality **98/100** | `npx -y @smithery/cli@latest mcp publish "https://ai.oliverkiss.com/mcp" -n kiss-olie/agentic-endpoints` — **no auth needed**, and it updates in place. The scan finds all 17 tools (re-publish after adding one, or it keeps reporting the old count). Note the namespace is `kiss-olie`, not the GitHub handle. Their registry API and the markdown view served to non-browser clients are both **badly stale** (still report 12 tools and the old favicon); only the browser-rendered page is current, so verify there |
+| Smithery | **Published — [`kiss-olie/agentic-endpoints`](https://smithery.ai/servers/kiss-olie/agentic-endpoints)**, quality **98/100** | `npx -y @smithery/cli@latest mcp publish "https://ai.oliverkiss.com/mcp" -n kiss-olie/agentic-endpoints` — **no auth needed**, and it updates in place. The scan finds all 20 tools (re-publish after adding one, or it keeps reporting the old count). Note the namespace is `kiss-olie`, not the GitHub handle. Their registry API and the markdown view served to non-browser clients are both **badly stale** (still report 12 tools and the old favicon); only the browser-rendered page is current, so verify there |
 | Glama | Not listed; **claim file pre-placed** | `glama.json` at the repo root (`maintainers: ["olie-kiss"]`, schema `glama.ai/mcp/schemas/server.json`) claims the listing automatically if their GitHub crawler indexes us. The separate `/.well-known/glama.json` is a *different* schema (`connector.json`, an opaque `glama_claim_` token) for remote connectors and needs a listing to exist first |
 
 Aggregators such as PulseMCP ingest from the official registry, so publishing
