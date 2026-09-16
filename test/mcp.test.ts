@@ -134,7 +134,7 @@ describe("MCP tools", () => {
     expect(status).toBe(200);
     expect(json.result.resultType).toBe("complete");
     expect(json.result.cacheScope).toBe("public");
-    expect(json.result.tools.length).toBe(18);
+    expect(json.result.tools.length).toBe(20);
   });
 
   /**
@@ -259,5 +259,103 @@ describe("MCP tools", () => {
     const payload = JSON.parse(json.result.content[0].text);
     expect(payload.error).toBe("payment_required");
     expect(payload.price).toBe("$0.005");
+  });
+});
+
+/**
+ * The MCP endpoint carries more traffic than every other route combined, so a
+ * buyer who cannot reach the free tier from here cannot reach it at all. These
+ * tests exist because for two days it was unreachable: no tool issued credit,
+ * no tool accepted it, and the payment refusal recommended x402 to clients
+ * that have no wallet.
+ */
+describe("MCP free tier", () => {
+  it("offers a tool that issues credit, so a client can start without a wallet", async () => {
+    const { json } = await rpc("tools/list");
+    const trial = json.result.tools.find((t: any) => t.name === "credits_trial");
+
+    expect(trial).toBeDefined();
+    expect(trial.description).toMatch(/free/i);
+    // Requiring arguments would defeat the point: there is nothing a caller
+    // could know to supply before it has anything.
+    expect(trial.inputSchema.required ?? []).toEqual([]);
+  });
+
+  it("lets every paid tool be paid for by argument, not only by header", async () => {
+    const { json } = await rpc("tools/list");
+    const paid = json.result.tools.filter((t: any) => /Costs \$/.test(t.description));
+
+    expect(paid.length).toBeGreaterThan(0);
+    for (const tool of paid) {
+      // An MCP client controls arguments, not headers. Without this the
+      // token it was just issued is unusable.
+      expect(tool.inputSchema.properties.credit_token, tool.name).toBeDefined();
+      // It is one of three ways to pay, so demanding it would break x402.
+      expect(tool.inputSchema.required ?? [], tool.name).not.toContain("credit_token");
+    }
+  });
+
+  it("does not invite a free tool to spend credit it never needed", async () => {
+    const { json } = await rpc("tools/list");
+    const free = json.result.tools.filter((t: any) => /This tool is free/.test(t.description));
+
+    expect(free.length).toBeGreaterThan(0);
+    for (const tool of free) {
+      if (tool.name === "credits_balance") continue; // takes a token to read it
+      expect(tool.inputSchema.properties?.credit_token, tool.name).toBeUndefined();
+    }
+  });
+
+  it("points a refused call at the free route out, not only at x402", async () => {
+    const { json } = await rpc("tools/call", {
+      name: "compress",
+      arguments: { text: "hello world" },
+    });
+
+    const payload = JSON.parse(json.result.content[0].text);
+    expect(payload.error).toBe("payment_required");
+    // A client with no wallet must be told what it can actually do.
+    expect(payload.free_trial.tool).toBe("credits_trial");
+    expect(payload.message).toMatch(/credits_trial/);
+  });
+
+  it("issues a different trial token to a different caller", async () => {
+    // Regression: the sub-request was built with fresh headers and so reached
+    // the handler with no client address. Every caller derived the same token
+    // from "unknown" and shared one $0.10 ledger, so the first to ask drained
+    // it and the rest got an exhausted token.
+    const a = await rpc("tools/call", { name: "credits_trial", arguments: {} },
+      { headers: { "CF-Connecting-IP": "203.0.113.7" } });
+    const b = await rpc("tools/call", { name: "credits_trial", arguments: {} },
+      { headers: { "CF-Connecting-IP": "198.51.100.42" } });
+
+    const tokenA = JSON.parse(a.json.result.content[0].text).credit_token;
+    const tokenB = JSON.parse(b.json.result.content[0].text).credit_token;
+
+    expect(tokenA).toMatch(/^ae_trial_/);
+    expect(tokenB).toMatch(/^ae_trial_/);
+    expect(tokenA).not.toBe(tokenB);
+  });
+
+  it("spends the trial token supplied as an argument", async () => {
+    const issued = await rpc("tools/call", { name: "credits_trial", arguments: {} },
+      { headers: { "CF-Connecting-IP": "203.0.113.99" } });
+    const token = JSON.parse(issued.json.result.content[0].text).credit_token;
+
+    const { json } = await rpc("tools/call", {
+      name: "compress",
+      arguments: {
+        // Under the default 1000-token budget this text is returned unchanged.
+        text: "The quick brown fox jumps over the lazy dog. ".repeat(20),
+        target_tokens: 10,
+        credit_token: token,
+      },
+    }, { headers: { "CF-Connecting-IP": "203.0.113.99" } });
+
+    expect(json.result.isError).toBe(false);
+    expect(json.result.structuredContent.text).toBeTruthy();
+
+    // The credential must not survive into the work the handler received.
+    expect(JSON.stringify(json.result.structuredContent)).not.toContain(token);
   });
 });

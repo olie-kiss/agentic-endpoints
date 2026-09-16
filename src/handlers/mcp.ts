@@ -534,7 +534,63 @@ const TOOLS: ToolDef[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "credits_trial",
+    title: "Get free credit to try the paid tools",
+    description:
+      "Free, and the first tool to call if any other tool has told you payment is required. Returns a credit_token carrying $0.10 of credit — roughly twenty calls — with no wallet, no signature, no account and no email. Pass the returned token as the `credit_token` argument to any paid tool and it will run without an x402 payment. One allowance per caller: asking again returns the same token and whatever balance is left on it, never a refill. When it runs out, buy more with the /credits/buy endpoint.",
+    path: "/credits/trial",
+    price: "free",
+    annotations: WRITES_IDEMPOTENT,
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "credits_balance",
+    title: "Check how much credit a token has left",
+    description:
+      "Free. Reports the remaining balance on a credit token so you can tell 'out of credit' apart from 'the call failed', which otherwise look identical from the outside.",
+    path: "/credits/balance",
+    price: "free",
+    annotations: READS,
+    inputSchema: {
+      type: "object",
+      properties: {
+        credit_token: str("The credit token to check"),
+      },
+      required: ["credit_token"],
+      additionalProperties: false,
+    },
+  },
 ];
+
+/**
+ * Credit is carried as an HTTP header, but an MCP client only controls a
+ * tool's *arguments* — most cannot attach a per-call header at all. Without
+ * this the free trial is unreachable over MCP, which is the busiest way in.
+ * Declared once and injected into every paid tool so a new tool cannot
+ * silently omit it.
+ */
+const CREDIT_TOKEN_ARG = str(
+  "Optional. A credit token from credits_trial or /credits/buy. Supplying it pays for this call from that balance, so no x402 payment or wallet is needed.",
+);
+
+/**
+ * A paid tool's advertised schema, with `credit_token` added. Free tools are
+ * returned untouched: offering to spend credit on something that costs
+ * nothing would invite a client to burn its trial balance for no reason.
+ *
+ * `credit_token` is never added to `required` — it is one of three ways to
+ * pay, not a mandatory field.
+ */
+function withCreditToken(tool: ToolDef): Record<string, unknown> {
+  if (tool.price === "free") return tool.inputSchema;
+
+  const properties = (tool.inputSchema.properties ?? {}) as Record<string, unknown>;
+  return {
+    ...tool.inputSchema,
+    properties: { ...properties, credit_token: CREDIT_TOKEN_ARG },
+  };
+}
 
 /**
  * Declared response shapes, one per tool.
@@ -554,6 +610,33 @@ const n = (description: string) => ({ type: "number", description });
 const b = (description: string) => ({ type: "boolean", description });
 
 export const OUTPUT_SCHEMAS: Record<string, Record<string, unknown>> = {
+  credits_trial: {
+    type: "object",
+    properties: {
+      credit_token: s(
+        "The token to pass as `credit_token` to any paid tool. Shown here and derivable again from the same caller, but not recoverable from us.",
+      ),
+      balance_usd: s("Credit remaining, in dollars"),
+      granted_usd: s("Size of the one-off allowance"),
+      trial: b("Always true; distinguishes this from purchased credit"),
+      exhausted: b(
+        "True when the allowance is spent. Asking again will not refill it, so buy credit or pay per call.",
+      ),
+      usage: s("How to spend the token"),
+      note: s("Why a second request returns the same token rather than more credit"),
+      next: s("What to do when it runs out"),
+    },
+    required: ["credit_token", "balance_usd", "trial", "exhausted"],
+  },
+  credits_balance: {
+    type: "object",
+    properties: {
+      balance_usd: s("Credit remaining, in dollars"),
+      balance_micros: n("Credit remaining in integer micro-dollars, the authoritative figure"),
+      currency: s("Always 'USD'"),
+    },
+    required: ["balance_usd"],
+  },
   x402_verify: {
     type: "object",
     properties: {
@@ -1117,8 +1200,8 @@ app.post("/", async (c) => {
           description:
             t.price === "free"
               ? `${t.description} This tool is free; no payment is required.`
-              : `${t.description} Costs ${t.price} in USDC on Base, paid via the x402 protocol.`,
-          inputSchema: t.inputSchema,
+              : `${t.description} Costs ${t.price} in USDC on Base, paid via the x402 protocol, or from a credit token — call credits_trial for free credit if you have neither.`,
+          inputSchema: withCreditToken(t),
           outputSchema: OUTPUT_SCHEMAS[t.name],
           annotations: t.annotations,
         })),
@@ -1138,6 +1221,24 @@ app.post("/", async (c) => {
       const args = (params.arguments ?? {}) as Record<string, unknown>;
 
       /**
+       * `credit_token` is a payment credential, not an input to the work, so
+       * it is lifted into the header the payment middleware reads and removed
+       * from the body. Leaving it in would fail validation on routes that set
+       * `additionalProperties: false`, and would write a live credential into
+       * whatever the handler logs or stores.
+       *
+       * An explicit X-Credit-Token header still wins: a client that can set
+       * headers has stated its intent more strongly than a model filling in
+       * an argument.
+       */
+      const { credit_token: creditArg, ...work } = args;
+      const creditHeader =
+        c.req.header("X-Credit-Token") ??
+        (typeof creditArg === "string" && creditArg.trim() !== ""
+          ? creditArg.trim()
+          : undefined);
+
+      /**
        * Re-enter the pipeline so the call passes the payment middleware and
        * the body cap exactly as a direct HTTP caller would. Reimplementing
        * the gate here would be a second code path to keep in sync, and the
@@ -1150,12 +1251,29 @@ app.post("/", async (c) => {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       const payment = c.req.header("X-PAYMENT");
       if (payment) headers["X-PAYMENT"] = payment;
+      if (creditHeader) headers["X-Credit-Token"] = creditHeader;
+
+      /**
+       * The sub-request is built from scratch, so without this it reaches the
+       * handler with no client address at all. That is not cosmetic: the free
+       * trial derives its token from the caller's address, and every MCP
+       * caller collapsing to the same "unknown" address would hand the whole
+       * world a single shared $0.10 ledger — the first caller drains it and
+       * everyone after gets an exhausted token. It also restores per-caller
+       * rate limiting on issuance.
+       *
+       * Safe to forward because Cloudflare sets CF-Connecting-IP at the edge
+       * and overwrites any client-supplied value, so this is the real address
+       * rather than something the caller chose.
+       */
+      const clientIp = c.req.header("CF-Connecting-IP");
+      if (clientIp) headers["CF-Connecting-IP"] = clientIp;
 
       const upstream = await c.var.dispatch(
         new Request(target.toString(), {
           method: "POST",
           headers,
-          body: JSON.stringify(args),
+          body: JSON.stringify(work),
         }),
       );
 
@@ -1174,7 +1292,12 @@ app.post("/", async (c) => {
               text: JSON.stringify(
                 {
                   error: "payment_required",
-                  message: `${tool.name} costs ${tool.price}. Pay with the x402 protocol and retry, or call ${target} directly with an X-PAYMENT header.`,
+                  message: `${tool.name} costs ${tool.price}. Call the credits_trial tool for free credit (no wallet, no account), then retry this call passing the token it returns as credit_token. Alternatively pay with the x402 protocol, or call ${target} directly with an X-PAYMENT header.`,
+                  free_trial: {
+                    tool: "credits_trial",
+                    grant: "$0.10",
+                    then: "Pass the returned credit_token argument to this tool.",
+                  },
                   price: tool.price,
                   resource: target.toString(),
                   x402: accept

@@ -232,6 +232,17 @@ async function sendMessage(c: any, id: unknown, params: any) {
   const credit = c.req.header("X-Credit-Token");
   if (credit) headers.set("X-Credit-Token", credit);
 
+  /**
+   * Without this the sub-request arrives with no client address, and the free
+   * trial derives its token from that address: every A2A caller would collapse
+   * to one shared "unknown" ledger, so the first to ask drains the $0.10 and
+   * the rest receive an already-exhausted token. Also restores per-caller rate
+   * limiting. Cloudflare sets this header at the edge and overwrites any
+   * client-supplied value, so it is the real address.
+   */
+  const clientIp = c.req.header("CF-Connecting-IP");
+  if (clientIp) headers.set("CF-Connecting-IP", clientIp);
+
   // The a2a-x402 extension carries a signed payload in message metadata; a
   // client that speaks plain A2A sends the header instead. Accept both.
   const payment =
