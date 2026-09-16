@@ -63,7 +63,48 @@ describe("machine-readable discovery", () => {
     for (const path of Object.keys(await pricedPaths())) {
       const op = Object.values(spec.paths[path])[0] as any;
       expect(op.responses["402"]).toBeDefined();
-      expect(op.responses["402"].description).toMatch(/X-PAYMENT/);
+      // The body shape is documented, not just narrated, so a generated
+      // client can read the price and the ways to pay out of it.
+      expect(op.responses["402"].content["application/json"].schema.$ref).toBe(
+        "#/components/schemas/PaymentRequired",
+      );
+    }
+  });
+
+  /**
+   * Prose telling a caller to "send an X-Credit-Token header" is unusable by
+   * a generated client: without a declared security scheme there is no method
+   * on it that can set one. The free trial was reachable only by a human
+   * reading the description.
+   */
+  it("declares payment as something a generated client can actually send", async () => {
+    const spec = (await (await SELF.fetch(`${ORIGIN}/openapi.json`)).json()) as any;
+    const schemes = spec.components.securitySchemes;
+
+    expect(schemes.creditToken.name).toBe("X-Credit-Token");
+    expect(schemes.x402Payment.name).toBe("X-PAYMENT");
+    // The one route in that needs no wallet must be findable from the spec.
+    expect(schemes.creditToken.description).toMatch(/credits\/trial/);
+
+    for (const path of Object.keys(await pricedPaths())) {
+      const op = Object.values(spec.paths[path])[0] as any;
+      expect(op.security, path).toContainEqual({ creditToken: [] });
+      expect(op.security, path).toContainEqual({ x402Payment: [] });
+      // An unauthenticated call is legal and answers 402; saying otherwise
+      // would make a strict client refuse to send the request at all.
+      expect(op.security, path).toContainEqual({});
+    }
+  });
+
+  it("says out loud that the free endpoints need no credential", async () => {
+    const spec = (await (await SELF.fetch(`${ORIGIN}/openapi.json`)).json()) as any;
+
+    // Silence here made the spec fail validation, and a generated client that
+    // assumes a credential is needed will never call the one endpoint whose
+    // whole purpose is being callable by someone who has nothing.
+    for (const path of ["/credits/trial", "/credits/balance", "/once-key/complete"]) {
+      const op = (spec.paths[path] as any).post;
+      expect(op.security, path).toEqual([]);
     }
   });
 

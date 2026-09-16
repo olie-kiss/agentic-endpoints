@@ -220,12 +220,26 @@ export function buildOpenApi(routes: RoutesConfig, origin: string) {
           // a client that treats it as a failure can never buy anything.
           "402": {
             description:
-              "Payment required. The `payment-required` response header " +
-              "carries a base64 x402 challenge naming the price, asset and " +
-              "recipient. Sign it and retry with an X-PAYMENT header.",
+              "Payment required. The body names the price and all three ways " +
+              "to pay, including the free trial that needs no wallet. The " +
+              "`payment-required` response header carries the same challenge " +
+              "base64-encoded, which is where x402 v2 clients read it.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/PaymentRequired" },
+              },
+            },
           },
           "429": { description: "Rate limited." },
         },
+        /**
+         * Payment is optional in the OpenAPI sense: a call with no credential
+         * is valid and answers 402. Listing `{}` alongside the two schemes
+         * says exactly that, and without these a generated client has no way
+         * to set either header — the price and the trial are described in
+         * prose it cannot act on.
+         */
+        security: [{ creditToken: [] }, { x402Payment: [] }, {}],
       },
     };
   }
@@ -281,6 +295,13 @@ export function buildOpenApi(routes: RoutesConfig, origin: string) {
           "404": { description: "No such record." },
           "429": { description: "Rate limited." },
         },
+        /**
+         * Explicitly empty: these endpoints are free. Saying nothing would
+         * leave a generated client to guess, and one that guesses "needs a
+         * credential" will not call /credits/trial — the one endpoint whose
+         * entire purpose is to be callable by someone with nothing.
+         */
+        security: [],
       },
     };
   }
@@ -290,12 +311,70 @@ export function buildOpenApi(routes: RoutesConfig, origin: string) {
     info: {
       title: "agentic-endpoints",
       version: "1.0.0",
+      license: { name: "MIT", identifier: "MIT" },
       description:
         "Pay-per-call utilities for autonomous agents. No signup, no API " +
         "keys, no invoices: every endpoint answers HTTP 402 with a price and " +
         "serves the request once payment is signed.",
     },
     servers: [{ url: origin }],
+    components: {
+      securitySchemes: {
+        creditToken: {
+          type: "apiKey",
+          in: "header",
+          name: "X-Credit-Token",
+          description:
+            "A prepaid or trial balance. Get one free with no wallet and no " +
+            `account at POST ${origin}/credits/trial, or buy credit at ` +
+            `POST ${origin}/credits/buy. Each call is debited at the route's ` +
+            "list price and nothing is signed per request.",
+        },
+        x402Payment: {
+          type: "apiKey",
+          in: "header",
+          name: "X-PAYMENT",
+          description:
+            "A signed x402 payment authorising this one call, built from the " +
+            "challenge returned with HTTP 402. Requires a funded wallet on " +
+            "Base; the credit token does not.",
+        },
+      },
+      schemas: {
+        PaymentRequired: {
+          type: "object",
+          description:
+            "Body of a 402. Every field is derived from the same challenge " +
+            "the caller is asked to sign, so it cannot quote a different " +
+            "price or recipient.",
+          properties: {
+            error: { type: "string", const: "payment_required" },
+            price: { type: "string", description: "List price in dollars, e.g. $0.005" },
+            resource: { type: "string", description: "The URL being charged for" },
+            ways_to_pay: {
+              type: "object",
+              description:
+                "The three routes in, cheapest first. free_trial needs no " +
+                "wallet, no signature, no account and no email.",
+              properties: {
+                free_trial: { type: "object" },
+                prepaid_credit: { type: "object" },
+                per_call_x402: { type: "object" },
+              },
+            },
+            accepts: {
+              type: "array",
+              description:
+                "The x402 challenge, echoed here for v1 clients that read it " +
+                "from the body rather than the payment-required header.",
+              items: { type: "object" },
+            },
+            x402Version: { type: "number" },
+          },
+          required: ["error", "ways_to_pay"],
+        },
+      },
+    },
     paths,
   };
 }
