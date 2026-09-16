@@ -117,8 +117,16 @@ app.post("/trial", async (c) => {
   });
 });
 
-/** Free: a buyer must be able to check what they have without spending it. */
-app.post("/balance", async (c) => {
+/**
+ * Free: a buyer must be able to check what they have without spending it.
+ *
+ * GET as well as POST. Three responses hand this out as `balance_url`, and a
+ * URL labelled that way gets fetched, not posted to — which returned a bare
+ * 404 that read as "the endpoint you were just told about does not exist".
+ * Reading a balance is safe and idempotent, so GET was always the right verb;
+ * POST stays for anything already written against it.
+ */
+app.on(["GET", "POST"], "/balance", async (c) => {
   const token = c.req.header("X-Credit-Token");
   if (!token) {
     return c.json(

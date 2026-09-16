@@ -245,8 +245,7 @@ export function buildOpenApi(routes: RoutesConfig, origin: string) {
   }
 
   for (const free of FREE_POST_ENDPOINTS) {
-    paths[free.path] = {
-      post: {
+    const operation = {
         summary: free.summary,
         description: free.description,
         operationId: free.path
@@ -302,8 +301,21 @@ export function buildOpenApi(routes: RoutesConfig, origin: string) {
          * entire purpose is to be callable by someone with nothing.
          */
         security: [],
-      },
     };
+
+    /**
+     * Most free endpoints are POST-only. /credits/balance also answers GET,
+     * because three responses advertise it as `balance_url` and a URL named
+     * that way gets fetched; a spec that listed only POST would leave a
+     * generated client without the verb its own docs imply.
+     */
+    paths[free.path] =
+      free.path === "/credits/balance"
+        ? {
+            get: { ...operation, operationId: `${operation.operationId}_get` },
+            post: operation,
+          }
+        : { post: operation };
   }
 
   return {

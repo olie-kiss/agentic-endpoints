@@ -280,6 +280,19 @@ describe("paying with credits over HTTP", () => {
     expect(bad.status).toBe(404);
   });
 
+  it("answers the balance_url it advertises with the verb that URL implies", async () => {
+    // /credits/trial, /credits/buy and the legal page all hand out
+    // `balance_url`. A URL named that way gets fetched, and GET used to 404 —
+    // which reads as "the endpoint you were just told about does not exist".
+    await fund("ae_get_check", 1_000_000);
+
+    const got = await SELF.fetch("https://ai.oliverkiss.com/credits/balance", {
+      headers: { "X-Credit-Token": "ae_get_check" },
+    });
+    expect(got.status).toBe(200);
+    expect((await got.json()).balance_usd).toBe("1.000000");
+  });
+
   it("keeps the credit packs themselves behind real payment", async () => {
     // Selling credit for credit would let a token mint its own successor.
     const res = await SELF.fetch("https://ai.oliverkiss.com/credits/buy", {
