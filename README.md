@@ -191,7 +191,7 @@ CDP Bazaar is skipped for exactly that reason.
 
 | Catalog | Status | How |
 |---|---|---|
-| PayAI Bazaar | Not listed on mainnet — **mechanism proven on testnet** | Listing requires a payment that *settles*, once per route; reaching `/verify` does nothing. Confirmed on Base Sepolia: all 9 routes appeared in `/discovery/resources` within seconds of paying. `X402_TEST_PRIVATE_KEY=0x... node scripts/trigger-indexing.mjs` costs **$0.068** for the whole catalogue |
+| PayAI Bazaar | Not listed on mainnet — **mechanism proven on testnet** | A `/verify` is enough: it catalogues and moves no funds, and the catalog worker admits a `POST` route whose read-only probe answers `402`. Confirmed on Base Sepolia — 16/16 routes listed with `source: "verify"` and the signer's balance unchanged. Mainnet needs only that the payer *hold* ~$0.03: `X402_TEST_PRIVATE_KEY=0x... node scripts/list-in-bazaar.mjs` |
 | x402-list.com | **Dead — directory shut down** | Submitted and domain ownership verified on 2026-09-12 (`probe_result endpoints_found=16`), review pending. By 2026-09-16 the domain was parked for sale on Spaceship: nameservers `launch1/launch2.spaceship.net`, no service behind it. The review will never arrive. The ownership token has been deleted and `/.well-known/x402list.txt` now 404s. Worth recording rather than deleting: an x402 directory folding inside a month is a fact about the market, not just about this listing |
 | Official MCP Registry | **Published — `com.oliverkiss/agentic-endpoints`, status active** | `./scripts/publish-registry.sh`. Ownership proven by an apex TXT record and an ed25519-signed timestamp, so no financial account is involved |
 | npm | **Published — [`agentic-endpoints`](https://www.npmjs.com/package/agentic-endpoints)** | `cd sdk && npm publish`. Counts as discovery, not just convenience: npm is crawled by every AI coding assistant, so the client is findable by the same models that would use the service |
@@ -423,11 +423,10 @@ npm run deploy
 npm test
 npm run typecheck
 
-# Re-announce every route to the PayAI Bazaar. This SPENDS REAL USDC: a route
-# is catalogued only once a payment for it settles. It refuses to start unless
-# the wallet covers the whole run.
+# Announce every route to the PayAI Bazaar. Spends nothing: it verifies rather
+# than settles, so the wallet only has to hold the prices, never pay them.
 export X402_TEST_PRIVATE_KEY=0x...
-node scripts/trigger-indexing.mjs
+node scripts/list-in-bazaar.mjs
 
 # Make one real paid call. Requires a THROWAWAY wallet holding a little USDC
 # on Base; the key is read from the environment and never written anywhere.
@@ -455,15 +454,30 @@ demanded testnet tokens would hand out real work for money anyone can mint.
 ### Announcing to the Bazaar
 
 ```bash
-X402_TEST_PRIVATE_KEY=0x... node scripts/trigger-indexing.mjs
+X402_TEST_PRIVATE_KEY=0x... node scripts/list-in-bazaar.mjs
 ```
 
-Pays for each route once, which is what puts it in the catalogue. $0.082 for
-all 14 utility routes; credit packs are excluded unless you pass
-`--include-credits`. The script checks the payer's USDC balance against that
-total first and refuses to start if it falls short, because a wallet that runs
-dry midway leaves the catalogue half-populated with no way to tell which
-routes made it.
+Lists every utility route in the PayAI Bazaar **without spending anything**.
+
+Cataloguing runs on the facilitator's `/verify` as well as `/settle`, and
+verification moves no funds. A first listing of a `POST` resource seen only
+through `/verify` is normally deferred until it settles, but the catalog
+worker admits it anyway when its own read-only probe (`HEAD`, then `GET`)
+answers `402` — which every paid route here does. So the signing wallet only
+has to *hold* the price of each route, because verification checks the
+balance; it never moves it. Three cents covers all 16 routes.
+
+Verified against the live facilitator on Base Sepolia: 16/16 routes went from
+having no catalog row at all to `lastWrite: { status: "listed", source:
+"verify" }`, with the signer's balance unchanged to the last micro-dollar
+afterwards.
+
+Check any route's status, and the reason if it is missing, with:
+
+```bash
+curl "https://facilitator.payai.network/discovery/listing-status?resource=\
+https%3A%2F%2Fai.oliverkiss.com%2Fcompress"
+```
 
 ## API Examples
 

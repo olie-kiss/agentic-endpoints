@@ -1,5 +1,5 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Credits } from "../src/durable-objects/credits";
 import { statsStub } from "../src/index";
 import type { Env } from "../src/types";
@@ -232,11 +232,18 @@ describe("paying with credits over HTTP", () => {
     // An x402 caller gets this same 4xx for nothing, because settlement is
     // cancelled above 399. Billing it here would charge the customer who
     // committed money up front for an error the per-call customer gets free.
+    // The refund is issued through ctx.waitUntil, so it lands after the
+    // response does. Reading the ledger straight away races it and fails
+    // perhaps one run in ten. Polling asserts what the customer actually
+    // cares about -- that the credit comes back -- without pretending the
+    // refund is synchronous when it is not.
     const { tokenHash, stub } = await account("ae_refund");
-    const ledger = await runInDurableObject(stub, (i: Credits) =>
-      i.balance(tokenHash),
-    );
-    expect(ledger?.balance_usd).toBe("1.000000");
+    await vi.waitFor(async () => {
+      const ledger = await runInDurableObject(stub, (i: Credits) =>
+        i.balance(tokenHash),
+      );
+      expect(ledger?.balance_usd).toBe("1.000000");
+    }, { timeout: 5000, interval: 25 });
   });
 
   it("leaves per-call x402 completely untouched", async () => {
@@ -335,13 +342,17 @@ describe("paying with the wrong method", () => {
     const got = await call("GET");
     expect(got.status).toBe(404);
 
-    // Charged exactly once: for the call that actually did the work.
+    // Charged exactly once: for the call that actually did the work. The 404
+    // is charged and then refunded through ctx.waitUntil, so this has to wait
+    // for that to settle rather than read the ledger mid-flight.
     const { stub } = await account(token);
-    const ledger = await runInDurableObject(stub, (i: Credits) =>
-      i.balance(tokenHash),
-    );
-    expect(ledger?.call_count).toBe(1);
-    expect(ledger?.balance_micros).toBe(4_995_000);
+    await vi.waitFor(async () => {
+      const ledger = await runInDurableObject(stub, (i: Credits) =>
+        i.balance(tokenHash),
+      );
+      expect(ledger?.call_count).toBe(1);
+      expect(ledger?.balance_micros).toBe(4_995_000);
+    }, { timeout: 5000, interval: 25 });
   });
 });
 
