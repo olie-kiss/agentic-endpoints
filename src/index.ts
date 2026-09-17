@@ -45,6 +45,7 @@ import vaultHandler from "./handlers/vault";
 import meetingsHandler from "./handlers/meetings";
 import verifyHandler from "./handlers/verify";
 import { landingPage } from "./pages/landing";
+import { iconSvg } from "./pages/icon";
 
 // Re-export the Durable Object classes so wrangler can find them
 export { OnceKey } from "./durable-objects/once-key";
@@ -191,6 +192,23 @@ app.get("/", (c) => {
 
 // ── Health check (free) ───────────────────────────────────────────
 app.get("/health", (c) => c.json({ status: "ok" }));
+
+/**
+ * The service icon (free).
+ *
+ * Declared as `iconUrl` on every paid route, which the Bazaar persists and
+ * renders beside the listing. It has to actually resolve: an entry pointing
+ * at a 404 is worse than one with no icon, and until now this 404'd because
+ * the file existed only in the repository.
+ */
+app.get("/icon.svg", (c) =>
+  new Response(iconSvg, {
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "public, max-age=86400",
+    },
+  }),
+);
 
 /**
  * Machine-readable descriptions of the service.
@@ -500,9 +518,66 @@ export function networkFor(env: Env): typeof BASE_MAINNET | typeof BASE_SEPOLIA 
   return env.X402_NETWORK === BASE_SEPOLIA ? BASE_SEPOLIA : BASE_MAINNET;
 }
 
+/**
+ * Where the catalog should send a buyer who wants to look before paying, and
+ * where it should fetch the listing icon from.
+ *
+ * Deliberately a constant rather than the request origin: these values are
+ * copied into a third-party catalog and outlive the request that produced
+ * them, so a probe that happened to arrive on the workers.dev hostname must
+ * not be able to pin the public listing to it.
+ */
+const CANONICAL_ORIGIN = "https://ai.oliverkiss.com";
+
+/**
+ * Search terms for the discovery catalog, per route.
+ *
+ * These are the words an agent would actually use to describe the problem it
+ * has, not the words we use to describe the implementation. Nobody searching
+ * a catalog types "idempotency witness"; they type "exactly once".
+ */
+const ROUTE_TAGS: Record<string, string[]> = {
+  "/once-key": ["idempotency", "exactly-once", "deduplication", "reliability"],
+  "/scrape": ["scraping", "html", "markdown", "extraction", "web"],
+  "/pdf-parse": ["pdf", "text-extraction", "documents", "parsing"],
+  "/compress": ["compression", "tokens", "context", "llm", "cost-reduction"],
+  "/x402/verify": ["x402", "payments", "verification", "receipts"],
+  "/credits/buy": ["credits", "prepaid", "billing"],
+  "/credits/buy-25": ["credits", "prepaid", "billing"],
+  "/vault/store": ["secrets", "encryption", "storage", "vault"],
+  "/vault/retrieve": ["secrets", "encryption", "storage", "vault"],
+  "/vault/list": ["secrets", "vault", "storage"],
+  "/vault/exists": ["secrets", "vault", "storage"],
+  "/vault/delete": ["secrets", "vault", "storage"],
+  "/meetings/import": ["meetings", "transcripts", "memory", "notes"],
+  "/meetings/search": ["meetings", "search", "transcripts", "memory"],
+  "/meetings/summarize": ["meetings", "summarization", "transcripts"],
+  "/meetings/get": ["meetings", "transcripts", "memory"],
+  "/meetings/list": ["meetings", "transcripts", "memory"],
+  "/meetings/delete": ["meetings", "transcripts", "memory"],
+};
+
+/**
+ * Stamps every route with the fields the discovery catalog stores and shows.
+ *
+ * Applied centrally instead of being written into each route literal so that
+ * a route added later cannot silently ship without them — the failure mode
+ * would be invisible, since an under-described listing does not error, it
+ * just never gets picked.
+ */
+function withCatalogMetadata(routes: RoutesConfig): RoutesConfig {
+  for (const [path, route] of Object.entries(routes)) {
+    route.serviceName = "Agentic Endpoints";
+    route.iconUrl = `${CANONICAL_ORIGIN}/icon.svg`;
+    route.mimeType = "application/json";
+    route.tags = ROUTE_TAGS[path] ?? ["api", "x402"];
+  }
+  return routes;
+}
+
 export function buildRoutes(env: Env): RoutesConfig {
   const BASE = networkFor(env);
-  return {
+  const routes: RoutesConfig = {
     "/once-key": {
       accepts: {
         scheme: "exact",
@@ -1282,6 +1357,8 @@ export function buildRoutes(env: Env): RoutesConfig {
       }),
     },
   };
+
+  return withCatalogMetadata(routes);
 }
 
 /**
@@ -1867,7 +1944,11 @@ export function degradedChallenge(
 ): Response | null {
   const routes = buildRoutes(env) as Record<
     string,
-    { accepts?: { price?: string; payTo?: string }; description?: string }
+    {
+      accepts?: { price?: string; payTo?: string };
+      description?: string;
+      mimeType?: string;
+    }
   >;
   const entry = routes[path] ?? routes[`POST ${path}`];
   const micros = parsePriceMicros(entry?.accepts?.price);
@@ -1883,7 +1964,7 @@ export function degradedChallenge(
     resource: {
       url: `${origin}${path}`,
       description: entry?.description ?? "",
-      mimeType: "",
+      mimeType: entry?.mimeType ?? "application/json",
     },
     accepts: [
       {
@@ -2121,6 +2202,7 @@ const FREE_PATHS = new Set([
   "/openapi.json",
   "/robots.txt",
   "/sitemap.xml",
+  "/icon.svg",
 ]);
 
 /**

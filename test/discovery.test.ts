@@ -1,6 +1,8 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
+import { buildRoutes } from "../src/index";
+
 const ORIGIN = "https://ai.oliverkiss.com";
 
 async function catalogue() {
@@ -342,6 +344,61 @@ describe("domain-ownership proof for the directory listing", () => {
   it("is free: a proof behind a paywall cannot prove anything", async () => {
     const res = await SELF.fetch(`${ORIGIN}/.well-known/x402list.txt`);
 
+    expect(res.status).not.toBe(402);
+  });
+});
+
+/**
+ * The discovery catalog stores and renders these four fields. They are not
+ * validated by anything upstream: a listing with an empty mimeType, no tags
+ * and a broken icon is accepted silently and then simply never surfaces in a
+ * search. So they are asserted here, where a regression is visible.
+ */
+describe("catalog listing metadata", () => {
+  it("stamps every paid route with the fields the catalog persists", () => {
+    const routes = buildRoutes(env as unknown as Env) as Record<
+      string,
+      { serviceName?: string; iconUrl?: string; mimeType?: string; tags?: string[] }
+    >;
+
+    expect(Object.keys(routes).length).toBeGreaterThan(0);
+
+    for (const [path, route] of Object.entries(routes)) {
+      expect(route.serviceName, path).toBe("Agentic Endpoints");
+      expect(route.mimeType, path).toBe("application/json");
+      expect(route.iconUrl, path).toBe(`${ORIGIN}/icon.svg`);
+      expect(route.tags?.length, path).toBeGreaterThan(0);
+    }
+  });
+
+  it("gives each route tags of its own rather than one generic set", () => {
+    const routes = buildRoutes(env as unknown as Env) as Record<
+      string,
+      { tags?: string[] }
+    >;
+
+    // A catalog search ranks on these. If every route carried the same words,
+    // the listing would be one undifferentiated blob to any agent looking for
+    // a specific capability.
+    const distinct = new Set(
+      Object.values(routes).map((r) => (r.tags ?? []).join(",")),
+    );
+    expect(distinct.size).toBeGreaterThan(3);
+  });
+
+  it("serves the icon the listing points at", async () => {
+    const res = await SELF.fetch(`${ORIGIN}/icon.svg`);
+
+    // An icon URL in the catalog that 404s is worse than none at all.
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("image/svg+xml");
+    expect(await res.text()).toContain("<svg");
+  });
+
+  it("does not charge for the icon", async () => {
+    const res = await SELF.fetch(`${ORIGIN}/icon.svg`);
+
+    // The catalog fetches it with no wallet attached.
     expect(res.status).not.toBe(402);
   });
 });
