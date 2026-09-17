@@ -368,6 +368,11 @@ describe("catalog listing metadata", () => {
       expect(route.mimeType, path).toBe("application/json");
       expect(route.iconUrl, path).toBe(`${ORIGIN}/icon.svg`);
       expect(route.tags?.length, path).toBeGreaterThan(0);
+
+      // The generic fallback means this route was added without anyone
+      // choosing words for it. It would still pass a "has tags" check while
+      // being invisible to every search that matters, so it is failed here.
+      expect(route.tags, path).not.toEqual(["api", "x402"]);
     }
   });
 
