@@ -40,7 +40,11 @@ enabled = true
 head_sampling_rate = 1
 
 [vars]
-ENVIRONMENT = "development"
+# The deployment that serves ai.oliverkiss.com. Named honestly: the only
+# behaviour keyed off this is the testnet revenue-scan guard, but a production
+# Worker announcing itself as "development" is exactly the sort of label that
+# later gets trusted for something that matters.
+ENVIRONMENT = "production"
 
 # SUPPORT_EMAIL is set with `wrangler secret put SUPPORT_EMAIL`, not here.
 # The address is printed on public pages either way, so this is not about
