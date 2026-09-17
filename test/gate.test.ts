@@ -1,6 +1,6 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { buildRoutes } from "../src/index";
+import { buildRoutes, degradedChallenge } from "../src/index";
 import type { Env } from "../src/types";
 
 /**
@@ -237,7 +237,17 @@ describe("payment challenge explains itself", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: "hello world" }),
     });
-    return { res, body: await res.json().catch(() => null) };
+
+    // Read once and keep the raw text: a body can only be consumed a single
+    // time, and cloning a response whose body has already been read throws.
+    const text = await res.text();
+    let body: any = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+    return { res, body, text };
   }
 
   it("names the free way in, not only the paid ones", async () => {
@@ -276,9 +286,9 @@ describe("payment challenge explains itself", () => {
   });
 
   it("sends a body whose length matches what it declares", async () => {
-    const { res } = await challenge();
+    const { res, text } = await challenge();
     const declared = res.headers.get("Content-Length");
-    const actual = new TextEncoder().encode(await res.clone().text()).length;
+    const actual = new TextEncoder().encode(text).length;
 
     // A stale Content-Length from the empty body would truncate the response
     // to two bytes, which is worse than sending nothing.
@@ -293,5 +303,82 @@ describe("payment challenge explains itself", () => {
       if (res.status !== 402) continue;
       expect(body?.ways_to_pay?.free_trial?.how, path).toContain("/credits/trial");
     }
+  });
+});
+
+/**
+ * A facilitator outage used to answer every paid route with 503.
+ *
+ * That threw away the buyers who could still have paid: prepaid credit and the
+ * free trial settle in our own Durable Object and never touch the facilitator.
+ * It also told the uptime and trust monitors that index this service that we
+ * were down, which costs the rating on the one distribution channel that
+ * currently brings anyone here at all.
+ */
+describe("payment challenge survives a facilitator outage", () => {
+  const request = new Request("https://ai.oliverkiss.com/compress", {
+    method: "POST",
+  });
+
+  function degraded(path = "/compress") {
+    return degradedChallenge(env as unknown as Env, request, path);
+  }
+
+  it("asks for payment rather than reporting an outage", () => {
+    const res = degraded();
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(402);
+    expect(res!.headers.get("Retry-After")).toBe("30");
+  });
+
+  it("still carries a challenge a strict x402 client can read", () => {
+    const encoded = degraded()!.headers.get("PAYMENT-REQUIRED");
+    expect(encoded).not.toBeNull();
+
+    const challenge = JSON.parse(atob(encoded!));
+    expect(challenge.x402Version).toBe(2);
+
+    // Built from the route table, so it must still quote the real price,
+    // payee and asset — a challenge that misquotes those is worse than none.
+    const [accepts] = challenge.accepts;
+    expect(accepts.scheme).toBe("exact");
+    expect(accepts.amount).toBe("5000");
+    expect(accepts.payTo).toBe((env as unknown as Env).X402_PAY_TO);
+    expect(accepts.asset).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    expect(accepts.network).toBe("eip155:8453");
+  });
+
+  it("names the two ways to pay that do not need the facilitator", async () => {
+    const body = await degraded()!.json<any>();
+
+    expect(body.price).toBe("$0.005");
+    expect(body.ways_to_pay.free_trial.status).toBe("available");
+    expect(body.ways_to_pay.prepaid_credit.status).toBe("available");
+
+    // Honest about what is actually broken, rather than silently offering a
+    // path that cannot complete.
+    expect(body.ways_to_pay.per_call_x402.status).toBe("degraded");
+  });
+
+  it("encodes a description that is not Latin-1 without throwing", () => {
+    // /once-key's description contains an em dash. btoa throws on it, which
+    // would have turned a degraded response into a 500.
+    const res = degraded("/once-key");
+    expect(res).not.toBeNull();
+
+    const challenge = JSON.parse(
+      new TextDecoder().decode(
+        Uint8Array.from(atob(res!.headers.get("PAYMENT-REQUIRED")!), (c) =>
+          c.charCodeAt(0),
+        ),
+      ),
+    );
+    expect(challenge.resource.description).toContain("—");
+    expect(challenge.accepts[0].amount).toBe("1000");
+  });
+
+  it("refuses to invent a price for a route that has none", () => {
+    expect(degraded("/health")).toBeNull();
+    expect(degraded("/not-a-route")).toBeNull();
   });
 });
