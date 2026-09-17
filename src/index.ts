@@ -475,6 +475,18 @@ const BASE_MAINNET = "eip155:8453" as const;
 const BASE_SEPOLIA = "eip155:84532" as const;
 
 /**
+ * USDC per network, needed to state a price without the facilitator.
+ *
+ * The middleware normally derives this from the registered scheme, but the
+ * degraded challenge below is built precisely when the middleware could not
+ * be constructed, so it has to know the asset itself.
+ */
+const USDC_FOR_NETWORK = {
+  [BASE_MAINNET]: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  [BASE_SEPOLIA]: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+} as const;
+
+/**
  * Which chain the payment gate demands and the facilitator settles on.
  *
  * Configurable for exactly one reason: settlement is the only part of this
@@ -1556,8 +1568,28 @@ async function handleRequest(
       } catch (err) {
         console.error("Facilitator unreachable:", err);
 
-        // Only paid paths reach here, so there is nothing serviceable to
-        // fall back to; free routes were already answered above.
+        /**
+         * A facilitator outage must not close the shop.
+         *
+         * This used to answer 503, which threw away every buyer who could
+         * still have paid: prepaid credits and the free trial are settled in
+         * our own Durable Object and never touch the facilitator, and the
+         * credit branch above already served them. Only the per-call x402
+         * path is actually degraded.
+         *
+         * A 503 also lied to the directories. The uptime and trust monitors
+         * that index this service score the unpaid handshake, so answering
+         * an outage in a third party with "we are down" costs the rating on
+         * the one distribution channel that currently works.
+         *
+         * The challenge below is built from the route table rather than from
+         * the facilitator, which is possible because nothing in it depends on
+         * the facilitator: the price, payee, asset and network are all ours.
+         */
+        const degraded = degradedChallenge(env, request, path);
+        if (degraded) return degraded;
+
+        // No price for this path, so there is nothing honest to charge for.
         return Response.json(
           {
             error: "Payment facilitator unavailable",
@@ -1798,6 +1830,120 @@ async function explainChallenge(
     null,
     2,
   );
+}
+
+/**
+ * Base64 for text that may contain non-ASCII characters.
+ *
+ * `btoa` throws on anything outside Latin-1, and several route descriptions
+ * contain an em dash. Clients decode this header as UTF-8, so encoding the
+ * UTF-8 bytes is both correct and what they already expect.
+ */
+function base64Utf8(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/**
+ * The payment challenge served when the facilitator cannot be reached.
+ *
+ * Deliberately a 402 and not a 503. Everything a buyer needs in order to pay
+ * is known without the facilitator — the price, payee, asset and network all
+ * come from the route table — and the two payment methods that do not involve
+ * the facilitator at all, the free trial and prepaid credit, keep working
+ * throughout. Only signature verification is unavailable, and the body says so
+ * rather than implying the service is down.
+ *
+ * Returns null for a path that carries no price, leaving the caller to answer
+ * however it sees fit: inventing a challenge for an unpriced route would be
+ * asking for money without naming what for.
+ */
+export function degradedChallenge(
+  env: Env,
+  request: Request,
+  path: string,
+): Response | null {
+  const routes = buildRoutes(env) as Record<
+    string,
+    { accepts?: { price?: string; payTo?: string }; description?: string }
+  >;
+  const entry = routes[path] ?? routes[`POST ${path}`];
+  const micros = parsePriceMicros(entry?.accepts?.price);
+  if (micros === null) return null;
+
+  const origin = new URL(request.url).origin;
+  const network = networkFor(env);
+  const amount = String(micros);
+
+  const challenge = {
+    x402Version: 2,
+    error: "Payment required",
+    resource: {
+      url: `${origin}${path}`,
+      description: entry?.description ?? "",
+      mimeType: "",
+    },
+    accepts: [
+      {
+        scheme: "exact",
+        network,
+        amount,
+        asset: USDC_FOR_NETWORK[network],
+        payTo: entry?.accepts?.payTo ?? env.X402_PAY_TO,
+        maxTimeoutSeconds: 300,
+        extra: { name: "USD Coin", version: "2" },
+      },
+    ],
+  };
+
+  const body = {
+    error: "payment_required",
+    message:
+      "This endpoint is paid. Signature verification is temporarily degraded, so the free trial or prepaid credit is the reliable way in right now — neither needs a wallet or a signature.",
+    price: usdFromMicros(amount),
+    resource: `${origin}${path}`,
+    ...(entry?.description ? { description: entry.description } : {}),
+    ways_to_pay: {
+      free_trial: {
+        how: `POST ${origin}/credits/trial`,
+        grant: "$0.10, about 20 calls",
+        then: "Retry this request with the returned token as an X-Credit-Token header.",
+        status: "available",
+      },
+      prepaid_credit: {
+        how: `POST ${origin}/credits/buy`,
+        detail:
+          "$5 buys $6.00 of credit, $25 buys $32.50. Spend it with an X-Credit-Token header and sign nothing per call.",
+        status: "available",
+      },
+      per_call_x402: {
+        how: "Sign the challenge below and retry with an X-PAYMENT header.",
+        detail:
+          "The payment facilitator is unreachable, so a signed payment cannot be verified at the moment. Retry shortly, or use the credit paths above, which settle here and are unaffected.",
+        status: "degraded",
+      },
+    },
+    accepts: challenge.accepts,
+    x402Version: challenge.x402Version,
+    docs: `${origin}/`,
+    openapi: `${origin}/openapi.json`,
+  };
+
+  return new Response(JSON.stringify(body, null, 2), {
+    status: 402,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Retry-After": "30",
+      "PAYMENT-REQUIRED": base64Utf8(JSON.stringify(challenge)),
+      "X-Credits-Available":
+        "Prepay to skip per-call signatures: $5 buys $6.00, $25 buys $32.50. POST /credits/buy",
+      "X-Trial-Available":
+        "Evaluate free first: POST /credits/trial returns a $0.10 credit token instantly, with no account, no email and no wallet.",
+    },
+  });
 }
 
 function parsePriceMicros(price: string | undefined): number | null {
